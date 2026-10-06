@@ -8,6 +8,8 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 st.set_page_config(
     page_title="SOMAT Dashboard",
@@ -360,6 +362,54 @@ def simulate_field_response(
         "learning": learning,
     }
 
+# ---------------- Komponen tampilan: kartu status ----------------
+def status_card(icon, title, value, note, badge_text, badge_kind, color):
+    """Membuat satu kartu status berwarna (HTML). Hanya urusan tampilan."""
+    return (
+        f'<div class="card card-{color}">'
+        f'<div class="card-title">{icon} {title}</div>'
+        f'<div class="card-value">{value}</div>'
+        f'<span class="badge badge-{badge_kind}">{badge_text}</span> '
+        f'<span class="card-note">{note}</span>'
+        f"</div>"
+    )
+
+# ---------------- Grafik kombinasi gaya dashboard ----------------
+def make_combo_chart(data):
+    """Grafik kondisi terbaru: garis (kelembapan, muka air) + batang (hujan)."""
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # Batang hujan (sumbu kanan)
+    fig.add_trace(
+        go.Bar(x=data["date"], y=data["rainfall"], name="Curah hujan (mm)",
+               marker_color="#B8C2CF", opacity=0.8),
+        secondary_y=True,
+    )
+    # Garis kelembapan tanah (sumbu kiri)
+    fig.add_trace(
+        go.Scatter(x=data["date"], y=data["soil_moisture"], mode="lines+markers",
+                   name="Kelembapan tanah (%)", line=dict(color="#1E9E57", width=3)),
+        secondary_y=False,
+    )
+    # Garis muka air (m x 30 supaya sebanding di sumbu kiri; lihat catatan)
+    fig.add_trace(
+        go.Scatter(x=data["date"], y=data["water_level"] * 30, mode="lines+markers",
+                   name="Tinggi muka air (m, skala x30)",
+                   line=dict(color="#1E6FD9", width=3),
+                   customdata=data["water_level"],
+                   hovertemplate="%{customdata:.2f} m<extra></extra>"),
+        secondary_y=False,
+    )
+
+    fig.update_layout(
+        height=360, margin=dict(l=10, r=10, t=30, b=10),
+        legend=dict(orientation="h", y=1.12),
+        plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF",
+    )
+    fig.update_yaxes(title_text="Kelembapan (%) / muka air (skala)", secondary_y=False)
+    fig.update_yaxes(title_text="Hujan (mm)", secondary_y=True)
+    return fig
+
 # ---------------- Fungsi pembuat grafik ----------------
 def make_line_chart(data, column, title, y_label, bar=False):
     """Membuat satu grafik time-series dari satu kolom tabel."""
@@ -383,6 +433,51 @@ st.warning(
     "secara simulasi untuk demonstrasi konsep SOMAT, bukan data penelitian aktual."
 )
 
+st.markdown(
+    """
+    <style>
+    /* Sidebar biru tua seperti referensi */
+    [data-testid="stSidebar"] {
+        background-color: #0B3A75;
+    }
+    [data-testid="stSidebar"] * {
+        color: #FFFFFF !important;
+    }
+    /* Ruang halaman utama sedikit lebih rapat */
+    .block-container {
+        padding-top: 2rem;
+    }
+        .card {
+        background: #FFFFFF;
+        border-radius: 14px;
+        padding: 16px 18px;
+        border: 1px solid #E1E8F2;
+        box-shadow: 0 1px 3px rgba(11, 58, 117, 0.08);
+        height: 100%;
+    }
+    .card-green  { background: #EAF7EE; border-color: #CBEBD3; }
+    .card-blue   { background: #E8F2FC; border-color: #C9DFF5; }
+    .card-orange { background: #FEF1E7; border-color: #F8D8BE; }
+    .card-red    { background: #FDECEC; border-color: #F6C9C9; }
+    .card-title  { font-size: 0.85rem; color: #4A5A73; font-weight: 600; }
+    .card-value  { font-size: 2rem; font-weight: 800; color: #0B3A75; line-height: 1.2; }
+    .card-note   { font-size: 0.78rem; color: #6B7A90; }
+    .badge {
+        display: inline-block; padding: 2px 10px; border-radius: 8px;
+        font-size: 0.75rem; font-weight: 700; color: #FFFFFF;
+    }
+    .badge-ok   { background: #1E9E57; }
+    .badge-warn { background: #E8590C; }
+    .badge-info { background: #1E6FD9; }
+        .status-panel { background:#FFFFFF; border:1px solid #E1E8F2; border-radius:14px; padding:16px 18px; }
+    .status-title { font-weight:700; color:#0B3A75; margin-bottom:8px; }
+    .status-row { padding:5px 0; color:#1B2A41; font-size:0.92rem; }
+    .st-ok { color:#1E9E57; font-weight:800; }
+    .st-warn { color:#E8590C; font-weight:800; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 df = generate_simulated_data()
 with st.sidebar:
     st.title("SOMAT")
@@ -515,29 +610,59 @@ else:
     system_status = "NORMAL"
 
 with overview_box:
-    st.header("Overview")
-    st.caption("Kondisi terbaru (data simulasi). Prototype, bukan data penelitian aktual.")
-
-    o1, o2, o3 = st.columns(3)
-    o1.metric("Soil Moisture", f"{latest['soil_moisture']} %")
-    o2.metric("Rainfall", f"{latest['rainfall']} mm")
-    o3.metric("Water Level", f"{latest['water_level']} m")
-
-    o4, o5, o6 = st.columns(3)
-    o4.metric("Available Discharge", f"{latest['available_discharge']:.3f} m³/s")
-    o5.metric(
-        "Predicted Crop Water Requirement",
-        f"{latest['crop_water_requirement']} mm/day",
+    st.header("Ringkasan Kondisi (Overview)")
+    st.caption(
+        "Kondisi terbaru. PROTOTYPE: seluruh angka adalah data simulasi, "
+        "bukan data penelitian aktual."
     )
-    o6.metric("System Status", system_status)
 
-    if system_status == "NORMAL":
-        st.success("System status: NORMAL. Tidak ada alert aktif dan hidraulik FEASIBLE.")
-    else:
-        st.warning(
-            "System status: ATTENTION. Ada alert atau kendala hidraulik. "
-            "Operator diminta memvalidasi rekomendasi."
-        )
+    low_m = 20
+    heavy_r = 20
+    sm_ok = latest["soil_moisture"] >= low_m
+    wl_ok = latest["water_level"] >= ASSUMPTIONS["min_water_level"]
+    rain_ok = latest["rainfall"] < heavy_r
+    q_ok = latest["available_discharge"] >= hydraulic["required_discharge"]
+
+    cards = [
+        status_card("🌱", "Kelembapan Tanah", f"{latest['soil_moisture']} %",
+                    f"Batas rendah {low_m}%",
+                    "Normal" if sm_ok else "Rendah",
+                    "ok" if sm_ok else "warn",
+                    "green" if sm_ok else "red"),
+        status_card("🌊", "Tinggi Muka Air", f"{latest['water_level']} m",
+                    f"Minimum {ASSUMPTIONS['min_water_level']} m",
+                    "Normal" if wl_ok else "Rendah",
+                    "ok" if wl_ok else "warn",
+                    "blue" if wl_ok else "red"),
+        status_card("🌧️", "Curah Hujan", f"{latest['rainfall']} mm",
+                    f"Batas tinggi {heavy_r} mm",
+                    "Normal" if rain_ok else "Tinggi",
+                    "ok" if rain_ok else "warn",
+                    "blue" if rain_ok else "orange"),
+        status_card("💧", "Debit Tersedia (Available Discharge)",
+                    f"{latest['available_discharge']:.3f} m³/s",
+                    f"Dibutuhkan {hydraulic['required_discharge']:.3f} m³/s",
+                    "Cukup" if q_ok else "Kurang",
+                    "ok" if q_ok else "warn",
+                    "blue" if q_ok else "red"),
+        status_card("🌾", "Prediksi Kebutuhan Air (Crop Water Requirement)",
+                    f"{latest['crop_water_requirement']} mm/hari",
+                    f"Irigasi prediksi {prediction['irrigation_mm']} mm",
+                    "Prediksi", "info", "orange"),
+        status_card("🛡️", "Status Sistem (System Status)",
+                    "NORMAL" if system_status == "NORMAL" else "PERHATIAN",
+                    "Perlu validasi operator" if system_status != "NORMAL"
+                    else "Tidak ada alert aktif",
+                    "Normal" if system_status == "NORMAL" else "Perhatian",
+                    "ok" if system_status == "NORMAL" else "warn",
+                    "green" if system_status == "NORMAL" else "red"),
+    ]
+
+    row1 = st.columns(3)
+    row2 = st.columns(3)
+    for col, html in zip(row1 + row2, cards):
+        col.markdown(html, unsafe_allow_html=True)
+        col.write("")
 
     st.divider()
 # Siapkan "papan catatan" jika belum ada
@@ -629,6 +754,25 @@ else:
     st.info("Belum ada keputusan operator pada session ini.")
 
 st.divider()
+def status_row(ok, label, text):
+    mark = '<span class="st-ok">✔</span>' if ok else '<span class="st-warn">⚠</span>'
+    return f'<div class="status-row">{mark} <b>{label}</b>: {text}</div>'
+
+
+panel_html = (
+    '<div class="status-panel"><div class="status-title">Status Sistem dan Lahan</div>'
+    + status_row(sm_ok, "Kelembapan tanah", f"{latest['soil_moisture']} %")
+    + status_row(wl_ok, "Tinggi muka air", f"{latest['water_level']} m")
+    + status_row(rain_ok, "Curah hujan hari ini", f"{latest['rainfall']} mm")
+    + status_row(hydraulic["feasible"], "Status hidraulik", hydraulic["status"])
+    + status_row(not alerts, "Alert aktif", f"{len(alerts)} alert")
+    + "</div>"
+)
+st.markdown(panel_html, unsafe_allow_html=True)
+st.write("")
+st.header("Grafik Kondisi Terbaru (14 Hari Terakhir)")
+st.caption("Data simulasi (prototype).")
+st.plotly_chart(make_combo_chart(df.tail(14)), width="stretch")
 st.header("Monitoring")
 st.caption("Seluruh grafik di bawah berasal dari data simulasi.")
 
