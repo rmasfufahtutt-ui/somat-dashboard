@@ -11,6 +11,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 st.set_page_config(
     page_title="SOMAT Dashboard",
     layout="wide",
@@ -131,21 +132,21 @@ def check_hydraulic_feasibility(
     # 2. Tiga aturan cek
     checks = [
         {
-            "Check": "Canal water level",
-            "Value": f"{water_level:.2f} m",
-            "Limit": f">= {min_water_level:.2f} m",
+            "Pemeriksaan": "Tinggi muka air saluran",
+            "Nilai": f"{water_level:.2f} m",
+            "Batas": f">= {min_water_level:.2f} m",
             "Result": "PASS" if water_level >= min_water_level else "FAIL",
         },
         {
-            "Check": "Available discharge",
-            "Value": f"{available_discharge:.3f} m3/s (needed {required_discharge:.3f})",
-            "Limit": "available >= needed",
+            "Pemeriksaan": "Debit tersedia",
+            "Nilai": f"{available_discharge:.3f} m3/s (dibutuhkan {required_discharge:.3f})",
+            "Batas": "tersedia >= dibutuhkan",
             "Result": "PASS" if available_discharge >= required_discharge else "FAIL",
         },
         {
-            "Check": "Gate operational limit",
-            "Value": f"{required_discharge:.3f} m3/s",
-            "Limit": f"<= {gate_max_discharge:.2f} m3/s",
+            "Pemeriksaan": "Batas operasi pintu",
+            "Nilai": f"{required_discharge:.3f} m3/s",
+            "Batas": f"<= {gate_max_discharge:.2f} m3/s",
             "Result": "PASS" if required_discharge <= gate_max_discharge else "FAIL",
         },
     ]
@@ -193,23 +194,23 @@ def generate_recommendation(
     # Tentukan jumlah irigasi yang direkomendasikan
     if demand_mm <= 0:
         recommended_mm = 0.0
-        reasons.append("Predicted demand is 0 mm, so no irrigation is needed now.")
+        reasons.append("Prediksi kebutuhan 0 mm, sehingga irigasi belum diperlukan.")
     elif hydraulic["feasible"]:
         recommended_mm = demand_mm
         reasons.append(
-            f"Predicted demand is {demand_mm} mm and all hydraulic checks passed, "
-            "so the full demand is recommended."
+            f"Prediksi kebutuhan {demand_mm} mm dan semua cek hidraulik lolos, "
+            "sehingga kebutuhan penuh disarankan."
         )
     else:
         recommended_mm = min(demand_mm, max_deliverable_mm)
         reasons.append(
-            f"Predicted demand is {demand_mm} mm, but the hydraulic check is NOT FEASIBLE."
+            f"Prediksi kebutuhan {demand_mm} mm, tetapi cek hidraulik TIDAK LAYAK."
         )
         if not level_ok:
-            reasons.append("Canal water level is below the minimum limit.")
+            reasons.append("Tinggi muka air saluran di bawah batas minimum.")
         reasons.append(
-            f"Only about {max_deliverable_mm:.1f} mm can be delivered within "
-            f"{delivery_hours} hours, so the recommendation is reduced."
+            f"Hanya sekitar {max_deliverable_mm:.1f} mm yang dapat dialirkan dalam "
+            f"{delivery_hours} jam, sehingga rekomendasi dikurangi."
         )
     recommended_mm = round(recommended_mm, 1)
 
@@ -222,13 +223,13 @@ def generate_recommendation(
     # Tentukan prioritas
     if soil_moisture < 20 or demand_mm >= 20:
         priority = "HIGH"
-        reasons.append("Soil is very dry or demand is large, so priority is HIGH.")
+        reasons.append("Tanah sangat kering atau kebutuhan besar, sehingga prioritas TINGGI.")
     elif demand_mm >= 3:
         priority = "NORMAL"
-        reasons.append("Moderate demand, so priority is NORMAL.")
+        reasons.append("Kebutuhan sedang, sehingga prioritas NORMAL.")
     else:
         priority = "LOW"
-        reasons.append("Very small demand, so priority is LOW.")
+        reasons.append("Kebutuhan sangat kecil, sehingga prioritas RENDAH.")
 
     return {
         "recommended_mm": recommended_mm,
@@ -241,6 +242,7 @@ def generate_recommendation(
 # ---------------- Decision log (disimpan selama session) ----------------
 def log_decision(decision, recommendation, irrigation_mm, duration_hours, note):
     """Menambahkan satu catatan keputusan operator ke Decision Log."""
+    st.session_state.pop("pending_recommendation", None)
     feedback = simulate_field_response(
         decision=decision,
         operator_mm=irrigation_mm,
@@ -404,10 +406,189 @@ def make_combo_chart(data):
     fig.update_layout(
         height=360, margin=dict(l=10, r=10, t=30, b=10),
         legend=dict(orientation="h", y=1.12),
-        plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF",
+        template="plotly_dark",
+        plot_bgcolor="#101F36", paper_bgcolor="#101F36",
     )
     fig.update_yaxes(title_text="Kelembapan (%) / muka air (skala)", secondary_y=False)
     fig.update_yaxes(title_text="Hujan (mm)", secondary_y=True)
+    return fig
+
+# ---------------- Sensor simulasi (PROTOTYPE) ----------------
+SENSORS = [
+    {"sensor_id": "SM-01", "sensor_type": "soil_moisture", "location": "Petak 1", "unit": "%"},
+    {"sensor_id": "SM-02", "sensor_type": "soil_moisture", "location": "Petak 2", "unit": "%"},
+    {"sensor_id": "SM-03", "sensor_type": "soil_moisture", "location": "Petak 3", "unit": "%"},
+    {"sensor_id": "SM-04", "sensor_type": "soil_moisture", "location": "Petak 4", "unit": "%"},
+    {"sensor_id": "SM-05", "sensor_type": "soil_moisture", "location": "Petak 5", "unit": "%"},
+    {"sensor_id": "SM-06", "sensor_type": "soil_moisture", "location": "Petak 6", "unit": "%"},
+    {"sensor_id": "WL-01", "sensor_type": "water_level", "location": "Depan pintu tersier", "unit": "m"},
+    {"sensor_id": "RF-01", "sensor_type": "rainfall",
+     "location": "Stasiun hujan eksternal (simulasi; nanti BMKG/BBWS)", "unit": "mm"},
+]
+
+
+def generate_sensor_readings(hours=168, seed=7):
+    """
+    PROTOTYPE: membangkitkan pembacaan sensor SIMULASI per jam.
+    Bukan data sensor nyata. Saat sensor sungguhan tersedia, fungsi ini
+    diganti dengan pembaca data sensor; bagian lain tidak perlu berubah.
+    """
+    rng = np.random.default_rng(seed)
+    times = pd.date_range(end=pd.Timestamp.now().floor("h"), periods=hours, freq="h")
+
+    # Hujan per jam: jarang terjadi, kadang deras
+    rain = np.where(rng.random(hours) < 0.04, rng.gamma(2.0, 3.0, hours), 0.0)
+
+    values = {}
+
+    # 6 sensor kelembapan tanah: turun karena penguapan, naik saat hujan
+    for k in range(1, 7):
+        sm = np.zeros(hours)
+        sm[0] = rng.normal(31, 2)
+        for i in range(1, hours):
+            evap = 0.05 if 8 <= times[i].hour <= 16 else 0.02  # siang lebih cepat
+            sm[i] = np.clip(sm[i - 1] - evap + 0.3 * rain[i], 12, 45)
+        values[f"SM-{k:02d}"] = sm + rng.normal(0, 0.15, hours)
+
+    # Muka air: naik sedikit setelah hujan + gelombang pelan + noise
+    recent_rain = pd.Series(rain).rolling(6, min_periods=1).sum().to_numpy()
+    wl = 1.10 + 0.015 * recent_rain + 0.03 * np.sin(np.arange(hours) / 12)
+    wl = wl + rng.normal(0, 0.01, hours)
+    values["WL-01"] = np.clip(wl, 0.6, 1.8)
+
+    values["RF-01"] = rain
+
+    # Susun menjadi satu tabel panjang
+    frames = []
+    for s in SENSORS:
+        v = values[s["sensor_id"]].copy()
+        missing = rng.random(hours) < 0.01      # sekitar 1% data hilang
+        if s["sensor_id"] == "SM-04":
+            missing[-5:] = True                 # SM-04 mati 5 jam terakhir
+        v[missing] = np.nan
+        frames.append(pd.DataFrame({
+            "timestamp": times,
+            "sensor_id": s["sensor_id"],
+            "sensor_type": s["sensor_type"],
+            "location": s["location"],
+            "value": np.round(v, 2),
+            "unit": s["unit"],
+            "status": np.where(np.isnan(v), "NO DATA", "OK"),
+        }))
+    return pd.concat(frames, ignore_index=True)
+
+# ---------------- Ringkasan sensor -> kondisi terbaru ----------------
+def summarize_sensors(sensor_df):
+    """Mengubah pembacaan sensor per jam menjadi kondisi terbaru untuk SOMAT."""
+    ok = sensor_df[sensor_df["status"] == "OK"]
+
+    # Kelembapan tanah: ambil pembacaan valid terakhir tiap sensor, lalu rata-rata
+    sm_last = (
+        ok[ok["sensor_type"] == "soil_moisture"]
+        .sort_values("timestamp")
+        .groupby("sensor_id")
+        .tail(1)
+    )
+    soil_moisture = float(sm_last["value"].mean())
+
+    # Muka air: pembacaan valid terakhir WL-01
+    wl = ok[ok["sensor_type"] == "water_level"].sort_values("timestamp")
+    water_level = float(wl["value"].iloc[-1])
+
+    # Hujan: jumlah 24 jam terakhir
+    rf = ok[ok["sensor_type"] == "rainfall"].sort_values("timestamp")
+    rainfall_24h = float(rf["value"].tail(24).sum())
+
+    # Kualitas data: persentase pembacaan valid
+    data_quality = 100 * len(ok) / len(sensor_df)
+
+    return {
+        "soil_moisture": round(soil_moisture, 1),
+        "water_level": round(water_level, 2),
+        "rainfall": round(rainfall_24h, 1),
+        "sensors_used": int(sm_last["sensor_id"].nunique()),
+        "data_quality": round(data_quality, 1),
+    }
+
+# ---------------- Status sensor (online/offline) ----------------
+def sensor_status_table(sensor_df, offline_after_hours=3):
+    """Menentukan tiap sensor Online atau Offline dari pembacaan valid terakhir."""
+    now = sensor_df["timestamp"].max()
+    ok = sensor_df[sensor_df["status"] == "OK"]
+    last_ok = ok.groupby("sensor_id")["timestamp"].max()
+
+    rows = []
+    for s in SENSORS:
+        last = last_ok.get(s["sensor_id"])
+        if last is None or (now - last) > pd.Timedelta(hours=offline_after_hours):
+            state = "Offline"
+        else:
+            state = "Online"
+        rows.append({
+            "Sensor": s["sensor_id"],
+            "Jenis": s["sensor_type"],
+            "Lokasi": s["location"],
+            "Status": state,
+            "Data valid terakhir": last,
+        })
+    return pd.DataFrame(rows)
+
+# ---------------- Grafik beranimasi ----------------
+def make_animated_line(data, column, title, y_label, color="#1E9E57"):
+    """Grafik garis yang tergambar bertahap saat dibuka (animasi)."""
+    x = list(data["date"])
+    y = list(data[column])
+    n = len(x)
+
+    fig = go.Figure(
+        data=[go.Scatter(x=x[:1], y=y[:1], mode="lines+markers",
+                         line=dict(color=color, width=3))],
+        frames=[go.Frame(data=[go.Scatter(x=x[:k], y=y[:k])])
+                for k in range(1, n + 1)],
+    )
+    pad = (max(y) - min(y)) * 0.15 or 1
+    fig.update_layout(
+        title=title, height=320, template="plotly_dark",
+        paper_bgcolor="#101F36", plot_bgcolor="#101F36",
+        margin=dict(l=10, r=10, t=50, b=10),
+        xaxis=dict(range=[x[0], x[-1]]),
+        yaxis=dict(range=[min(y) - pad, max(y) + pad], title=y_label),
+        updatemenus=[dict(
+            type="buttons", showactive=False, x=1, y=1.18, xanchor="right",
+            buttons=[dict(label="▶ Putar ulang", method="animate",
+                          args=[None, dict(frame=dict(duration=70, redraw=True),
+                                           transition=dict(duration=0),
+                                           fromcurrent=False)])],
+        )],
+    )
+    return fig
+
+
+def show_animated(fig, height=340, spin=False):
+    """Menampilkan grafik Plotly dan memutar animasinya otomatis."""
+    html = fig.to_html(include_plotlyjs="cdn", full_html=False, auto_play=True)
+    anim = (
+        "<style>@keyframes spinIn{from{opacity:0;transform:rotate(-120deg) scale(.4);}"
+        "to{opacity:1;transform:none;}}"
+        ".spin{animation:spinIn 1.2s ease-out both;transform-origin:50% 55%;}</style>"
+    )
+    body = f'<div class="spin">{html}</div>' if spin else html
+    components.html(
+        f'<body style="margin:0;background:#101F36;overflow:hidden;">{anim}{body}</body>',
+        height=height,
+    )
+
+def make_animated_donut(labels, values, colors, title, center_text):
+    """Donat statis; animasi putar masuk diberikan oleh show_animated(spin=True)."""
+    fig = go.Figure(go.Pie(
+        labels=labels, values=values, hole=0.62,
+        marker=dict(colors=colors), sort=False,
+    ))
+    fig.update_layout(
+        title=title, height=320, template="plotly_dark",
+        paper_bgcolor="#101F36", margin=dict(l=10, r=10, t=50, b=10),
+        annotations=[dict(text=center_text, x=0.5, y=0.5, showarrow=False, font_size=18)],
+    )
     return fig
 
 # ---------------- Fungsi pembuat grafik ----------------
@@ -438,7 +619,7 @@ st.markdown(
     <style>
     /* Sidebar biru tua seperti referensi */
     [data-testid="stSidebar"] {
-        background-color: #0B3A75;
+        background-color: #08111F;
     }
     [data-testid="stSidebar"] * {
         color: #FFFFFF !important;
@@ -448,20 +629,20 @@ st.markdown(
         padding-top: 2rem;
     }
         .card {
-        background: #FFFFFF;
+        background: #101F36;
         border-radius: 14px;
         padding: 16px 18px;
-        border: 1px solid #E1E8F2;
-        box-shadow: 0 1px 3px rgba(11, 58, 117, 0.08);
+        border: 1px solid #1E3252;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
         height: 100%;
     }
-    .card-green  { background: #EAF7EE; border-color: #CBEBD3; }
-    .card-blue   { background: #E8F2FC; border-color: #C9DFF5; }
-    .card-orange { background: #FEF1E7; border-color: #F8D8BE; }
-    .card-red    { background: #FDECEC; border-color: #F6C9C9; }
-    .card-title  { font-size: 0.85rem; color: #4A5A73; font-weight: 600; }
-    .card-value  { font-size: 2rem; font-weight: 800; color: #0B3A75; line-height: 1.2; }
-    .card-note   { font-size: 0.78rem; color: #6B7A90; }
+    .card-green  { background: #0F2A24; border-color: #1B5A45; }
+    .card-blue   { background: #0F2440; border-color: #1E4A80; }
+    .card-orange { background: #2E2112; border-color: #6B4A1E; }
+    .card-red    { background: #321618; border-color: #7A2A2E; }
+    .card-title  { font-size: 0.85rem; color: #9FB1CC; font-weight: 600; }
+    .card-value  { font-size: 2rem; font-weight: 800; color: #FFFFFF; line-height: 1.2; }
+    .card-note   { font-size: 0.78rem; color: #8396B3; }
     .badge {
         display: inline-block; padding: 2px 10px; border-radius: 8px;
         font-size: 0.75rem; font-weight: 700; color: #FFFFFF;
@@ -469,46 +650,76 @@ st.markdown(
     .badge-ok   { background: #1E9E57; }
     .badge-warn { background: #E8590C; }
     .badge-info { background: #1E6FD9; }
-        .status-panel { background:#FFFFFF; border:1px solid #E1E8F2; border-radius:14px; padding:16px 18px; }
-    .status-title { font-weight:700; color:#0B3A75; margin-bottom:8px; }
-    .status-row { padding:5px 0; color:#1B2A41; font-size:0.92rem; }
+    .status-panel { background:#101F36; border:1px solid #1E3252; border-radius:14px; padding:16px 18px; }
+    .status-title { font-weight:700; color:#FFFFFF; margin-bottom:8px; }
+    .status-row { padding:5px 0; color:#E6EDF7; font-size:0.92rem; }
     .st-ok { color:#1E9E57; font-weight:800; }
     .st-warn { color:#E8590C; font-weight:800; }
+        @keyframes fadeUp {
+        from { opacity: 0; transform: translateY(12px); }
+        to   { opacity: 1; transform: none; }
+    }
+    .card, .status-panel { animation: fadeUp 0.6s ease-out both; }
+
+    @keyframes pulse {
+        0%   { box-shadow: 0 0 0 0 rgba(47, 128, 237, 0.7); }
+        70%  { box-shadow: 0 0 0 8px rgba(47, 128, 237, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(47, 128, 237, 0); }
+    }
+    .sim-dot {
+        display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+        background: #2F80ED; margin-right: 8px; animation: pulse 2s infinite;
+    }
+    @media (prefers-reduced-motion: reduce) {
+        .card, .status-panel, .sim-dot { animation: none; }
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 df = generate_simulated_data()
+sensor_df = generate_sensor_readings()
 with st.sidebar:
     st.title("SOMAT")
     st.caption("Smart Adaptive Irrigation Management System")
-    st.error("Prototype — Simulated Data")
-
-    st.subheader("Navigation")
+    st.error("⚠️ Prototype — Data Simulasi")
     st.markdown(
-        "- [Water Demand Prediction](#water-demand-prediction)\n"
-        "- [Hydraulic Feasibility](#hydraulic-feasibility)\n"
-        "- [SOMAT Recommendation](#somat-recommendation)\n"
-        "- [Alerts / Anomaly](#alerts-anomaly)\n"
-        "- [Operator Decision](#operator-decision-human-in-the-loop)\n"
-        "- [Feedback Loop](#feedback-loop)\n"
-        "- [Monitoring](#monitoring)"
+        '<span class="sim-dot"></span>Mode simulasi berjalan',
+        unsafe_allow_html=True,
     )
 
-    st.subheader("SOMAT workflow")
-    st.markdown(
-        "Observe → Predict → Hydraulic Check → Recommend → "
-        "Human Validation → Operate → Feedback"
+    st.subheader("📂 Menu")
+    page = st.radio(
+        "Pilih halaman",
+        [
+            "Ringkasan",
+            "Monitoring Sensor",
+            "Prediksi & Rekomendasi",
+            "Peringatan",
+            "Keputusan Operator",
+        ],
+        label_visibility="collapsed",
     )
 
-    st.subheader("Assumed values")
+    st.subheader("🔁 Alur kerja SOMAT")
+    st.markdown(
+        "Observasi → Prediksi → Cek Hidraulik → Rekomendasi → "
+        "Validasi Operator → Operasi → Umpan Balik"
+    )
+
+    st.subheader("⚙️ Nilai asumsi")
     st.caption("Angka contoh, bukan data lapangan.")
-    st.write(f"Service area: {ASSUMPTIONS['area_ha']} ha")
-    st.write(f"Delivery time: {ASSUMPTIONS['delivery_hours']} hours")
-    st.write(f"Min. water level: {ASSUMPTIONS['min_water_level']} m")
-    st.write(f"Gate capacity: {ASSUMPTIONS['gate_max_discharge']} m³/s")
+    st.write(f"Luas layanan: {ASSUMPTIONS['area_ha']} ha")
+    st.write(f"Waktu pemberian air: {ASSUMPTIONS['delivery_hours']} jam")
+    st.write(f"Muka air minimum: {ASSUMPTIONS['min_water_level']} m")
+    st.write(f"Kapasitas pintu: {ASSUMPTIONS['gate_max_discharge']} m³/s")
+    
 # Ambil kondisi terbaru (baris terakhir tabel)
-latest = df.iloc[-1]
+latest = df.iloc[-1].copy()
+sensor_summary = summarize_sensors(sensor_df)
+latest["soil_moisture"] = sensor_summary["soil_moisture"]
+latest["water_level"] = sensor_summary["water_level"]
+latest["rainfall"] = sensor_summary["rainfall"]
 
 prediction = predict_irrigation_requirement(
     soil_moisture=latest["soil_moisture"],
@@ -516,47 +727,14 @@ prediction = predict_irrigation_requirement(
     et0=latest["et0"],
 )
 overview_box = st.container()
-st.header("Water Demand Prediction")
-st.caption("Prototype prediction logic (rule-based), bukan model AI final tesis.")
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Soil Moisture (%)", latest["soil_moisture"])
-c2.metric("Rainfall (mm)", latest["rainfall"])
-c3.metric("ET0 (mm/day)", latest["et0"])
-c4.metric("Predicted irrigation", f"{prediction['irrigation_mm']} mm")
-
-with st.expander("Lihat rincian perhitungan"):
-    st.write("Kebutuhan dasar (ET0 x Kc):", prediction["base_demand"], "mm")
-    st.write("Kekurangan air tanah:", prediction["deficit_mm"], "mm")
-    st.write("Hujan efektif:", prediction["useful_rain"], "mm")
-    st.write("Hasil = dasar + kekurangan - hujan efektif")
-
-st.divider()
+# ---- Perhitungan (selalu dijalankan, dipakai halaman lain) ----
 hydraulic = check_hydraulic_feasibility(
     irrigation_mm=prediction["irrigation_mm"],
     available_discharge=latest["available_discharge"],
     water_level=latest["water_level"],
 )
 
-st.header("Hydraulic Feasibility")
-st.caption(
-    "Prototype rule-based check. Luas areal, jam pemberian air, batas muka air, "
-    "dan kapasitas pintu adalah angka contoh (assumed values)."
-)
-
-h1, h2, h3 = st.columns(3)
-h1.metric("Water demand", f"{prediction['irrigation_mm']} mm")
-h2.metric("Available discharge", f"{latest['available_discharge']:.3f} m³/s")
-h3.metric("Required discharge", f"{hydraulic['required_discharge']:.3f} m³/s")
-
-if hydraulic["feasible"]:
-    st.success("Hydraulic status = FEASIBLE")
-else:
-    st.error("Hydraulic status = NOT FEASIBLE")
-
-st.dataframe(pd.DataFrame(hydraulic["checks"]), width="stretch", hide_index=True)
-
-st.divider()
 recommendation = generate_recommendation(
     prediction=prediction,
     hydraulic=hydraulic,
@@ -564,20 +742,90 @@ recommendation = generate_recommendation(
     soil_moisture=latest["soil_moisture"],
 )
 
-st.header("SOMAT Recommendation")
-st.caption("System suggestion only. Awaiting operator validation. Simulated data.")
+# ---- Tampilan: hanya di halaman "Prediksi & Rekomendasi" ----
+if page == "Prediksi & Rekomendasi":
+    st.header("💧 Prediksi Kebutuhan Air")
+    st.caption("Logika prediksi prototype (berbasis aturan), bukan model AI final tesis.")
 
-r1, r2, r3, r4 = st.columns(4)
-r1.metric("Recommended irrigation", f"{recommendation['recommended_mm']} mm")
-r2.metric("Recommended duration", f"{recommendation['duration_hours']} hours")
-r3.metric("Hydraulic feasibility", recommendation["feasibility"])
-r4.metric("Priority", recommendation["priority"])
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("🌱 Kelembapan Tanah (%)", latest["soil_moisture"])
+    c2.metric("🌧️ Curah Hujan (mm)", latest["rainfall"])
+    c3.metric("☀️ ET0 (mm/hari)", latest["et0"])
+    c4.metric("💧 Prediksi irigasi", f"{prediction['irrigation_mm']} mm")
 
-st.subheader("Why this recommendation?")
-for reason in recommendation["reasons"]:
-    st.markdown(f"- {reason}")
+    with st.expander("🔍 Lihat rincian perhitungan"):
+        st.write("Kebutuhan dasar (ET0 x Kc):", prediction["base_demand"], "mm")
+        st.write("Kekurangan air tanah:", prediction["deficit_mm"], "mm")
+        st.write("Hujan efektif:", prediction["useful_rain"], "mm")
+        st.write("Hasil = dasar + kekurangan - hujan efektif")
 
-st.divider()
+    st.divider()
+
+    st.header("🚰 Kelayakan Hidraulik")
+    st.caption(
+        "Pengecekan prototype berbasis aturan. Luas areal, jam pemberian air, batas muka air, "
+        "dan kapasitas pintu adalah angka asumsi."
+    )
+
+    h1, h2, h3 = st.columns(3)
+    h1.metric("💧 Kebutuhan air", f"{prediction['irrigation_mm']} mm")
+    h2.metric("🌊 Debit tersedia", f"{latest['available_discharge']:.3f} m³/s")
+    h3.metric("🚰 Debit dibutuhkan", f"{hydraulic['required_discharge']:.3f} m³/s")
+
+    if hydraulic["feasible"]:
+        st.success("✅ Status hidraulik = LAYAK (FEASIBLE)")
+    else:
+        st.error("⛔ Status hidraulik = TIDAK LAYAK (NOT FEASIBLE)")
+
+    st.dataframe(pd.DataFrame(hydraulic["checks"]), width="stretch", hide_index=True)
+
+    st.divider()
+
+    st.header("🧭 Rekomendasi SOMAT")
+    st.caption("Hanya saran sistem. Menunggu validasi operator. Data simulasi.")
+
+    feas_ok = recommendation["feasibility"] == "FEASIBLE"
+    prio = recommendation["priority"]
+    prio_label = {"HIGH": "TINGGI", "NORMAL": "NORMAL", "LOW": "RENDAH"}[prio]
+    prio_color = {"HIGH": "red", "NORMAL": "blue", "LOW": "green"}[prio]
+    prio_badge = {"HIGH": "warn", "NORMAL": "info", "LOW": "ok"}[prio]
+
+    rec_cards = [
+        status_card("💧", "Irigasi Disarankan",
+                    f"{recommendation['recommended_mm']} mm",
+                    f"Prediksi kebutuhan {prediction['irrigation_mm']} mm",
+                    "Saran", "info", "blue"),
+        status_card("⏱️", "Durasi Disarankan",
+                    f"{recommendation['duration_hours']} jam",
+                    f"Luas {ASSUMPTIONS['area_ha']} ha",
+                    "Saran", "info", "blue"),
+        status_card("🚰", "Kelayakan Hidraulik",
+                    "LAYAK" if feas_ok else "TIDAK LAYAK",
+                    "Semua cek lolos" if feas_ok else "Ada cek yang gagal",
+                    "Layak" if feas_ok else "Tidak layak",
+                    "ok" if feas_ok else "warn",
+                    "green" if feas_ok else "red"),
+        status_card("⚑", "Prioritas",
+                    prio_label,
+                    "Berdasarkan kebutuhan dan kelembapan tanah",
+                    prio_label.capitalize(), prio_badge, prio_color),
+    ]
+    for col, html in zip(st.columns(4), rec_cards):
+        col.markdown(html, unsafe_allow_html=True)
+    st.write("")
+    st.info("🕒 Status: menunggu validasi operator. Buka menu **Keputusan Operator** untuk menyetujui, mengubah, atau menunda.")
+    if st.button("📨 Kirim ke Operator untuk Validasi", type="primary"):
+        st.session_state["pending_recommendation"] = {
+            "mm": recommendation["recommended_mm"],
+            "hours": recommendation["duration_hours"],
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        st.success("Rekomendasi dikirim ke operator. Buka menu **Keputusan Operator** untuk memvalidasi.")
+    st.subheader("❓ Mengapa rekomendasi ini?")
+    for reason in recommendation["reasons"]:
+        st.markdown(f"- {reason}")
+
+    st.divider()
 alerts = detect_alerts(
     soil_moisture=latest["soil_moisture"],
     water_level=latest["water_level"],
@@ -585,31 +833,56 @@ alerts = detect_alerts(
     prediction=prediction,
     recommendation=recommendation,
 )
+if page == "Peringatan":
+    st.header("🚨 Peringatan / Anomali")
+    st.caption("Peringatan simulasi (berbasis aturan). Batas peringatan adalah angka contoh.")
 
-st.header("Alerts / Anomaly TES")
-st.caption("Simulated alerts (rule-based). Batas peringatan adalah angka contoh.")
+    if alerts:
+        for a in alerts:
+            if a["level"] == "error":
+                st.error(f"{a['title']}: {a['detail']}")
+            else:
+                st.warning(f"{a['title']}: {a['detail']}")
+        st.warning(
+            "Kondisi abnormal terdeteksi. Operator diminta memvalidasi "
+            "rekomendasi dengan teliti sebelum mengambil keputusan."
+        )
+    else:
+        st.success("✅ Tidak ada peringatan aktif. Kondisi dalam batas normal (data simulasi).")
 
-if alerts:
+    st.subheader("🗂️ Kejadian Terbaru")
+    incidents = []
+    sensor_now = sensor_status_table(sensor_df)
+    for _, row in sensor_now[sensor_now["Status"] == "Offline"].iterrows():
+        incidents.append({
+            "Waktu": str(row["Data valid terakhir"]),
+            "Sumber": row["Sensor"],
+            "Kejadian": "Sensor offline (tanpa data lebih dari 3 jam)",
+            "Tingkat": "Peringatan",
+            "Status": "Perlu diperiksa",
+        })
     for a in alerts:
-        if a["level"] == "error":
-            st.error(f"{a['title']}: {a['detail']}")
-        else:
-            st.warning(f"{a['title']}: {a['detail']}")
-    st.warning(
-        "Kondisi abnormal terdeteksi. Operator diminta memvalidasi "
-        "rekomendasi dengan teliti sebelum mengambil keputusan."
-    )
-else:
-    st.success("No active alerts. Kondisi dalam batas normal (data simulasi).")
+        incidents.append({
+            "Waktu": str(sensor_df["timestamp"].max()),
+            "Sumber": "Modul peringatan",
+            "Kejadian": f"{a['title']}: {a['detail']}",
+            "Tingkat": "Kritis" if a["level"] == "error" else "Peringatan",
+            "Status": "Terbuka",
+        })
 
-st.divider()
+    if incidents:
+        st.dataframe(pd.DataFrame(incidents), hide_index=True, width="stretch")
+    else:
+        st.info("Tidak ada kejadian. Seluruh sensor online dan tidak ada peringatan aktif.")
+    st.divider()
+
 # Status sistem: ATTENTION jika ada alert atau hidraulik tidak feasible
 if alerts or not hydraulic["feasible"]:
     system_status = "ATTENTION"
 else:
     system_status = "NORMAL"
 
-with overview_box:
+with (overview_box if page == "Ringkasan" else st.empty()):
     st.header("Ringkasan Kondisi (Overview)")
     st.caption(
         "Kondisi terbaru. PROTOTYPE: seluruh angka adalah data simulasi, "
@@ -665,140 +938,229 @@ with overview_box:
         col.write("")
 
     st.divider()
-# Siapkan "papan catatan" jika belum ada
+
+# Siapkan "papan catatan" jika belum ada (selalu dijalankan)
 if "decision_log" not in st.session_state:
     st.session_state["decision_log"] = []
 if "show_modify" not in st.session_state:
     st.session_state["show_modify"] = False
 
-st.header("Operator Decision (Human-in-the-Loop)")
-st.caption(
-    "SOMAT hanya memberi saran. Operator adalah pengambil keputusan akhir. "
-    "Tidak ada pintu irigasi yang digerakkan otomatis. Simulated data."
-)
-
-note = st.text_input("Operator note (opsional untuk APPROVE dan DELAY)")
-
-b1, b2, b3 = st.columns(3)
-approve = b1.button("APPROVE", type="primary", width="stretch")
-modify = b2.button("MODIFY", width="stretch")
-delay = b3.button("DELAY", width="stretch")
-
-if approve:
-    st.session_state["show_modify"] = False
-    log_decision(
-        "APPROVE", recommendation,
-        recommendation["recommended_mm"], recommendation["duration_hours"], note,
+if page == "Keputusan Operator":
+    st.header("👷 Keputusan Operator (Human in the Loop)")
+    st.caption(
+        "SOMAT hanya memberi saran. Operator adalah pengambil keputusan akhir. "
+        "Tidak ada pintu irigasi yang digerakkan otomatis. Data simulasi."
     )
-    st.success("Keputusan dicatat: APPROVE")
-
-if delay:
-    st.session_state["show_modify"] = False
-    log_decision("DELAY", recommendation, 0.0, 0.0, note or "Delayed by operator")
-    st.info("Keputusan dicatat: DELAY (irigasi ditunda)")
-
-if modify:
-    st.session_state["show_modify"] = True
-
-if st.session_state["show_modify"]:
-    with st.form("modify_form"):
-        st.subheader("Modify recommendation")
-        mod_mm = st.number_input(
-            "Irrigation amount (mm)",
-            min_value=0.0,
-            value=float(recommendation["recommended_mm"]),
-            step=0.5,
+    if "pending_recommendation" in st.session_state:
+        p = st.session_state["pending_recommendation"]
+        st.warning(
+            f"📨 Rekomendasi menunggu validasi: {p['mm']} mm selama {p['hours']} jam "
+            f"(dikirim {p['time']}). Pilih APPROVE, MODIFY, atau DELAY."
         )
-        mod_hours = st.number_input(
-            "Duration (hours)",
-            min_value=0.0,
-            value=float(recommendation["duration_hours"]),
-            step=0.5,
+    note = st.text_input("📝 Catatan operator (opsional untuk APPROVE dan DELAY)")
+
+    b1, b2, b3 = st.columns(3)
+    approve = b1.button("APPROVE", type="primary", width="stretch")
+    modify = b2.button("MODIFY", width="stretch")
+    delay = b3.button("DELAY", width="stretch")
+
+    if approve:
+        st.session_state["show_modify"] = False
+        log_decision(
+            "APPROVE", recommendation,
+            recommendation["recommended_mm"], recommendation["duration_hours"], note,
         )
-        mod_reason = st.text_area("Reason for modification (wajib diisi)")
-        submitted = st.form_submit_button("Submit modified decision")
+        st.success("Keputusan dicatat: APPROVE")
 
-    if submitted:
-        if mod_reason.strip() == "":
-            st.warning("Alasan wajib diisi sebelum menyimpan keputusan MODIFY.")
-        else:
-            st.session_state["show_modify"] = False
-            log_decision("MODIFY", recommendation, mod_mm, mod_hours, mod_reason)
-            st.success("Keputusan dicatat: MODIFY")
-st.header("Feedback Loop")
-st.caption("Simulated field response (prototype). Bukan hasil pengukuran lapangan.")
+    if delay:
+        st.session_state["show_modify"] = False
+        log_decision("DELAY", recommendation, 0.0, 0.0, note or "Delayed by operator")
+        st.info("Keputusan dicatat: DELAY (irigasi ditunda)")
 
-if "last_feedback" in st.session_state:
-    fb = st.session_state["last_feedback"]
-    f1, f2, f3 = st.columns(3)
-    with f1:
-        st.markdown("**1. SOMAT Recommendation**")
-        st.write(f"{fb['recommended_mm']} mm")
-    with f2:
-        st.markdown("**2. Operator Decision**")
-        st.write(f"{fb['decision']} - {fb['operator_mm']} mm")
-    with f3:
-        st.markdown("**3. Simulated Field Response**")
-        st.write(
-            f"Soil moisture {latest['soil_moisture']}% -> "
-            f"{fb['feedback']['new_moisture']}% ({fb['feedback']['status']})"
-        )
-    st.info("Feedback to SOMAT: " + fb["feedback"]["learning"])
-else:
-    st.info("Belum ada keputusan. Buat keputusan operator untuk melihat alur feedback.")
-st.subheader("Decision Log (session ini saja)")
-if st.session_state["decision_log"]:
-    log_df = pd.DataFrame(st.session_state["decision_log"][::-1])
-    st.dataframe(log_df, width="stretch", hide_index=True)
-else:
-    st.info("Belum ada keputusan operator pada session ini.")
+    if modify:
+        st.session_state["show_modify"] = True
 
-st.divider()
+    if st.session_state["show_modify"]:
+        with st.form("modify_form"):
+            st.subheader("✏️ Ubah rekomendasi")
+            mod_mm = st.number_input(
+                "Jumlah air irigasi (mm)",
+                min_value=0.0,
+                value=float(recommendation["recommended_mm"]),
+                step=0.5,
+            )
+            mod_hours = st.number_input(
+                "Durasi (jam)",
+                min_value=0.0,
+                value=float(recommendation["duration_hours"]),
+                step=0.5,
+            )
+            mod_reason = st.text_area("Alasan perubahan (wajib diisi)")
+            submitted = st.form_submit_button("Simpan keputusan yang diubah")
+
+        if submitted:
+            if mod_reason.strip() == "":
+                st.warning("Alasan wajib diisi sebelum menyimpan keputusan MODIFY.")
+            else:
+                st.session_state["show_modify"] = False
+                log_decision("MODIFY", recommendation, mod_mm, mod_hours, mod_reason)
+                st.success("Keputusan dicatat: MODIFY")
+
+    st.header("🔄 Umpan Balik (Feedback Loop)")
+    st.caption("Respons lapangan simulasi (prototype). Bukan hasil pengukuran lapangan.")
+
+    if "last_feedback" in st.session_state:
+        fb = st.session_state["last_feedback"]
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            st.markdown("**1. 🧭 Rekomendasi SOMAT**")
+            st.write(f"{fb['recommended_mm']} mm")
+        with f2:
+            st.markdown("**2. 👷 Keputusan Operator**")
+            st.write(f"{fb['decision']} - {fb['operator_mm']} mm")
+        with f3:
+            st.markdown("**3. 🌾 Respons Lapangan (Simulasi)**")
+            st.write(
+                f"Soil moisture {latest['soil_moisture']}% -> "
+                f"{fb['feedback']['new_moisture']}% ({fb['feedback']['status']})"
+            )
+        st.info("Feedback to SOMAT: " + fb["feedback"]["learning"])
+    else:
+        st.info("Belum ada keputusan. Buat keputusan operator untuk melihat alur feedback.")
+
+    st.subheader("📋 Riwayat Keputusan (sesi ini saja)")
+    if st.session_state["decision_log"]:
+        log_df = pd.DataFrame(st.session_state["decision_log"][::-1])
+        st.dataframe(log_df, width="stretch", hide_index=True)
+    else:
+        st.info("Belum ada keputusan operator pada session ini.")
+
+    st.divider()
 def status_row(ok, label, text):
     mark = '<span class="st-ok">✔</span>' if ok else '<span class="st-warn">⚠</span>'
     return f'<div class="status-row">{mark} <b>{label}</b>: {text}</div>'
 
+if page == "Monitoring Sensor":
+    sensor_table = sensor_status_table(sensor_df)
+    n_online = int((sensor_table["Status"] == "Online").sum())
+    n_total = len(sensor_table)
 
-panel_html = (
-    '<div class="status-panel"><div class="status-title">Status Sistem dan Lahan</div>'
-    + status_row(sm_ok, "Kelembapan tanah", f"{latest['soil_moisture']} %")
-    + status_row(wl_ok, "Tinggi muka air", f"{latest['water_level']} m")
-    + status_row(rain_ok, "Curah hujan hari ini", f"{latest['rainfall']} mm")
-    + status_row(hydraulic["feasible"], "Status hidraulik", hydraulic["status"])
-    + status_row(not alerts, "Alert aktif", f"{len(alerts)} alert")
-    + "</div>"
-)
-st.markdown(panel_html, unsafe_allow_html=True)
-st.write("")
-st.header("Grafik Kondisi Terbaru (14 Hari Terakhir)")
-st.caption("Data simulasi (prototype).")
-st.plotly_chart(make_combo_chart(df.tail(14)), width="stretch")
-st.header("Monitoring")
-st.caption("Seluruh grafik di bawah berasal dari data simulasi.")
+    st.header("Monitoring Sensor")
+    st.caption("Sensor SIMULASI (prototype). Stasiun hujan adalah data eksternal.")
 
-col1, col2 = st.columns(2)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.markdown(
+        status_card("📡", "Sensor Online", f"{n_online} / {n_total}",
+                    "Tanpa data > 3 jam = offline",
+                    "Normal" if n_online == n_total else "Perhatian",
+                    "ok" if n_online == n_total else "warn",
+                    "green" if n_online == n_total else "orange"),
+        unsafe_allow_html=True)
+    k2.markdown(
+        status_card("🌱", "Sensor Kelembapan Tanah",
+                    f"{int(((sensor_table['Jenis'] == 'soil_moisture') & (sensor_table['Status'] == 'Online')).sum())} / 6",
+                    "Petak 1-6", "Sensor", "info", "blue"),
+        unsafe_allow_html=True)
+    k3.markdown(
+        status_card("🚨", "Alert Aktif", f"{len(alerts)}",
+                    "Dari modul alert",
+                    "Normal" if not alerts else "Perhatian",
+                    "ok" if not alerts else "warn",
+                    "green" if not alerts else "red"),
+        unsafe_allow_html=True)
+    k4.markdown(
+        status_card("🗄️", "Kualitas Data", f"{sensor_summary['data_quality']} %",
+                    "Pembacaan valid 7 hari",
+                    "Baik" if sensor_summary["data_quality"] >= 95 else "Rendah",
+                    "ok" if sensor_summary["data_quality"] >= 95 else "warn",
+                    "blue"),
+        unsafe_allow_html=True)
+    st.write("")
 
-with col1:
-    st.plotly_chart(
-        make_line_chart(df, "soil_moisture", "Soil Moisture", "Soil moisture (%)"),
-        width="stretch",
+    d1, d2 = st.columns([1, 2])
+    with d1:
+        n_off = n_total - n_online
+        with d1:
+            n_off = n_total - n_online
+            show_animated(
+            make_animated_donut(
+                ["Online", "Offline"], [n_online, n_off],
+                ["#1E9E57", "#6B7A90"],
+                "Distribusi Status Sensor", f"{n_total}<br>Sensor",
+            ),
+            height=340,
+            spin=True,
+        )
+    with d2:
+        sm = sensor_df[sensor_df["sensor_type"] == "soil_moisture"]
+        trend = px.line(sm, x="timestamp", y="value", color="sensor_id",
+                        title="Tren Kelembapan Tanah per Sensor (7 hari)")
+        trend.update_layout(height=320, template="plotly_dark",
+                            paper_bgcolor="#101F36", plot_bgcolor="#101F36",
+                            yaxis_title="Kelembapan tanah (%)", xaxis_title="Waktu",
+                            margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(trend, width="stretch")
+
+    st.dataframe(sensor_table, hide_index=True, width="stretch")
+    st.divider()
+
+if page == "Ringkasan":
+    panel_html = (
+        '<div class="status-panel"><div class="status-title">Status Sistem dan Lahan</div>'
+        + status_row(sm_ok, "Kelembapan tanah", f"{latest['soil_moisture']} %")
+        + status_row(wl_ok, "Tinggi muka air", f"{latest['water_level']} m")
+        + status_row(rain_ok, "Curah hujan hari ini", f"{latest['rainfall']} mm")
+        + status_row(hydraulic["feasible"], "Status hidraulik", hydraulic["status"])
+        + status_row(not alerts, "Alert aktif", f"{len(alerts)} alert")
+        + "</div>"
     )
-    st.plotly_chart(
-        make_line_chart(df, "water_level", "Canal Water Level", "Water level (m)"),
-        width="stretch",
-    )
+    st.markdown(panel_html, unsafe_allow_html=True)
+    st.write("")
+    st.header("Grafik Kondisi Terbaru (14 Hari Terakhir)")
+    st.caption("Data simulasi (prototype).")
+    st.plotly_chart(make_combo_chart(df.tail(14)), width="stretch")
+if page == "Monitoring Sensor":
+    st.header("Monitoring")
+    st.caption("Seluruh grafik di bawah berasal dari data simulasi.")
 
-with col2:
-    st.plotly_chart(
-        make_line_chart(df, "rainfall", "Rainfall", "Rainfall (mm)", bar=True),
-        width="stretch",
-    )
-    st.plotly_chart(
-        make_line_chart(
-            df, "crop_water_requirement", "Crop Water Requirement", "CWR (mm/day)"
+    col1, col2 = st.columns(2)
+
+    with col1:
+        show_animated(
+        make_animated_line(df, "soil_moisture", "🌱 Kelembapan Tanah", "Kelembapan tanah (%)")
+        )
+        show_animated(
+        make_animated_line(df, "water_level", "🌊 Tinggi Muka Air Saluran",
+                               "Tinggi muka air (m)", color="#1E6FD9")
+        )
+
+    with col2:
+        st.plotly_chart(
+            make_line_chart(df, "rainfall", "🌧️ Curah Hujan", "Curah hujan (mm)", bar=True),
+            width="stretch",
+        )
+        show_animated(
+        make_animated_line(df, "crop_water_requirement", "🌾 Kebutuhan Air Tanaman",
+                               "KAT (mm/hari)", color="#E8590C")
         ),
         width="stretch",
-    )
+        
 
-with st.expander("Lihat tabel data simulasi"):
-    st.dataframe(df, width="stretch")
+    with st.expander("Lihat tabel data simulasi"):
+        st.dataframe(df, width="stretch")
+with st.expander("Tahap A: data sensor simulasi"):
+    st.caption("Sensor SIMULASI. Bukan data sensor nyata.")
+    st.dataframe(pd.DataFrame(SENSORS), hide_index=True, width="stretch")
+
+    st.write("Pembacaan valid terakhir tiap sensor:")
+    last_ok = (
+        sensor_df[sensor_df["status"] == "OK"]
+        .sort_values("timestamp")
+        .groupby("sensor_id")
+        .tail(1)
+    )
+    st.dataframe(last_ok, hide_index=True, width="stretch")
+
+    st.write("Jumlah baris:", len(sensor_df))
+    st.write("Jumlah pembacaan NO DATA:", int((sensor_df["status"] == "NO DATA").sum()))
+    st.write("Ringkasan sensor untuk SOMAT:", sensor_summary)       
