@@ -22,7 +22,7 @@ st.set_page_config(
     page_title="SOMAT Dashboard",
     page_icon="💧",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",
 )
 
 # ---------------- ASSUMPTIONS (angka contoh, bukan data lapangan) ----------------
@@ -1267,6 +1267,31 @@ _EXTRA_CSS = """
 .side-info-muted{font-size:.9rem!important;}
 .side-info-line{font-size:.98rem!important;}
 .side-flow{font-size:.98rem!important;line-height:1.65!important;}
+/* hanya satu tombol panah sidebar yang tampil */
+.stApp:has([data-testid="stSidebar"][aria-expanded="true"]) [data-testid="stExpandSidebarButton"]{display:none!important;}
+.stApp:has([data-testid="stSidebar"][aria-expanded="false"]) [data-testid="stSidebarCollapseButton"]{display:none!important;}
+
+/* ===== HP / layar kecil: font dan jarak diperkecil ===== */
+@media(max-width:800px){
+  html{font-size:14px;}
+  .block-container{padding:3.2rem .8rem 2rem!important;}
+  h1{font-size:1.25rem!important;}
+  h2,[data-testid="stHeading"] h2{font-size:1.3rem!important;line-height:1.25!important;}
+  h3,[data-testid="stHeading"] h3{font-size:1.1rem!important;}
+  [data-testid="stCaptionContainer"] p{font-size:.8rem!important;}
+  [data-testid="stAlert"] p,[data-testid="stAlert"]{font-size:.85rem!important;}
+  .somat-header{gap:10px;}
+  .somat-header img{width:46px!important;height:auto!important;}
+  .somat-header h1{font-size:1.15rem!important;line-height:1.2!important;}
+  .somat-header p{font-size:.78rem!important;}
+  .status-panel{padding:12px 14px;}
+  .status-row{font-size:.85rem!important;}
+  [data-testid="stSidebar"] .stButton>button p{font-size:.95rem!important;}
+  .side-brand img{width:64px;}
+  .side-brand-name{font-size:1.6rem;}
+  .side-brand-sub{font-size:.8rem;}
+  .st-key-theme_icon{top:.5rem!important;right:.6rem!important;}
+}
 """
 
 _LIGHT_CSS = """
@@ -1338,7 +1363,8 @@ st.markdown(
       :root{{--somat-bg:{THEME['bg']};--somat-panel:{THEME['panel']};--somat-text:{THEME['text']};--somat-muted:{THEME['muted']};--somat-border:{THEME['border']};}}
       .stApp{{background:var(--somat-bg);color:var(--somat-text);}}
       [data-testid="stHeader"]{{background:transparent;}}
-      [data-testid="stSidebar"]{{background:{THEME['sidebar']};border-right:1px solid {THEME['border']};width:21rem!important;min-width:21rem!important;}}
+      [data-testid="stSidebar"]{{background:{THEME['sidebar']};border-right:1px solid {THEME['border']};}}
+      @media(min-width:801px){{[data-testid="stSidebar"]{{width:21rem!important;min-width:21rem!important;}}}}
       [data-testid="stSidebarContent"]{{padding-top:.35rem!important;scrollbar-width:thin;scrollbar-color:rgba(148,163,184,.48) transparent;}}
       [data-testid="stSidebarContent"]::-webkit-scrollbar{{width:5px;}}
       [data-testid="stSidebarContent"]::-webkit-scrollbar-track{{background:transparent;}}
