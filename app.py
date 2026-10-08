@@ -355,7 +355,7 @@ def simulate_field_response(
     elif new_moisture <= target_moisture + 5:
         status = "Sesuai target"
     else:
-        status = "Di atas target (risiko irigasi berlebih)"
+        status = "Di atas target, risiko irigasi berlebih"
 
     # Pesan umpan balik ke sistem SOMAT
     difference = operator_mm - recommended_mm
@@ -1267,6 +1267,13 @@ _EXTRA_CSS = """
 .side-info-muted{font-size:.9rem!important;}
 .side-info-line{font-size:.98rem!important;}
 .side-flow{font-size:.98rem!important;line-height:1.65!important;}
+/* judul halaman lebih tenang */
+.block-container h2,[data-testid="stHeading"] h2{font-size:1.9rem!important;line-height:1.25!important;}
+.block-container h3,[data-testid="stHeading"] h3{font-size:1.35rem!important;}
+/* tombol aksi operator */
+.block-container [data-testid="stHorizontalBlock"] .stButton>button{min-height:52px;border-radius:12px;font-weight:800;}
+.block-container [data-testid="stHorizontalBlock"] .stButton>button p{font-size:1.05rem!important;font-weight:800!important;letter-spacing:.04em;}
+.block-container .stButton>button[kind="primary"],.block-container .stButton>button[data-testid="stBaseButton-primary"]{box-shadow:0 6px 16px rgba(47,128,237,.3);}
 /* hanya satu tombol panah sidebar yang tampil */
 .stApp:has([data-testid="stSidebar"][aria-expanded="true"]) [data-testid="stExpandSidebarButton"]{display:none!important;}
 .stApp:has([data-testid="stSidebar"][aria-expanded="false"]) [data-testid="stSidebarCollapseButton"]{display:none!important;}
@@ -1807,7 +1814,10 @@ elif page == "Keputusan Operator":
         p = st.session_state["pending_recommendation"]
         st.warning(f"📨 Rekomendasi menunggu validasi: {p['mm']} mm selama {p['hours']} jam (dikirim {p['time']}). Pilih APPROVE, MODIFY, atau DELAY.")
 
-    note = st.text_input("📝 Catatan operator (opsional untuk APPROVE dan DELAY)")
+    note = st.text_input(
+        "📝 Catatan operator (opsional untuk APPROVE dan DELAY)",
+        placeholder="Contoh: debit cukup, lanjutkan sesuai rekomendasi",
+    )
     b1, b2, b3 = st.columns(3)
     approve = b1.button("APPROVE", type="primary", width="stretch")
     modify = b2.button("MODIFY", width="stretch")
