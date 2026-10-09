@@ -163,3 +163,8 @@ Prototipe ini dirancang agar tiap bagian logika (prediksi, hidraulik, rekomendas
 ## 11. Lisensi dan penafian
 
 Prototipe untuk keperluan akademik dan demonstrasi. Tidak untuk dipakai sebagai dasar keputusan operasional irigasi.
+
+## Language / Bahasa
+
+The dashboard opens in **English** by default. Use the **🌐 EN / ID** button at the top-right
+to switch between English and Bahasa Indonesia (`?lang=id` in the URL also works).
