@@ -10,6 +10,7 @@ import base64
 import hashlib
 import hmac
 import html
+import io
 import json
 import os
 import re
@@ -23,6 +24,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 import streamlit.components.v1 as components
+from PIL import Image, ImageOps
 
 st.set_page_config(
     page_title="SOMAT Dashboard",
@@ -54,6 +56,7 @@ ASSUMPTIONS = {
 }
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def generate_simulated_data(days=30, seed=42):
     """Membuat tabel data harian simulasi untuk prototype SOMAT."""
     # "seed" membuat angka acak selalu sama setiap dijalankan,
@@ -278,10 +281,9 @@ def generate_recommendation(
 
 # ============================================================
 # DATABASE (Neon Postgres) + LOGIN
-# - Tanpa konfigurasi database  -> mode DEMO (seperti sebelumnya: tanpa login,
-#   keputusan hanya disimpan selama sesi).
-# - Dengan [neon] url di st.secrets -> login wajib untuk membuat keputusan
-#   operator, dan semua keputusan disimpan permanen + dicatat di audit log.
+# - Login wajib sebelum dashboard ditampilkan.
+# - Database Neon diperlukan untuk autentikasi, role, profil, dan penyimpanan keputusan.
+# - Jika database belum tersedia, aplikasi berhenti di halaman login dan dashboard terkunci.
 # Kata sandi TIDAK pernah disimpan polos: hanya hash PBKDF2-SHA256 + salt.
 # ============================================================
 try:
@@ -299,8 +301,13 @@ def _secret(section, key, default=""):
 
 
 DB_URL = str(_secret("neon", "url", "") or os.environ.get("DATABASE_URL", ""))
-DEMO_MODE = not DB_URL                 # database belum dikonfigurasi -> demo terbuka
-ROLES = ("admin", "operator", "viewer")
+SYSTEM_ROLES = ("admin", "operator", "viewer")
+APP_PAGE_KEYS = ("overview", "monitoring", "prediction", "alerts", "operator")
+DEFAULT_ROLE_PERMISSIONS = {
+    "admin": APP_PAGE_KEYS,
+    "operator": APP_PAGE_KEYS,
+    "viewer": ("overview", "monitoring", "prediction", "alerts"),
+}
 MAX_FAILS, LOCK_SECONDS = 5, 300       # 5x salah sandi -> akun dikunci 5 menit
 PBKDF2_ITERS = 310_000
 
@@ -338,6 +345,19 @@ SCHEMA_SQL = [
         username TEXT NOT NULL,
         action TEXT NOT NULL,
         detail TEXT NOT NULL DEFAULT ''
+    )""",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_data TEXT",
+    """CREATE TABLE IF NOT EXISTS roles (
+        role_key TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        is_system BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""",
+    """CREATE TABLE IF NOT EXISTS role_permissions (
+        role_key TEXT NOT NULL REFERENCES roles(role_key) ON DELETE CASCADE,
+        page_key TEXT NOT NULL,
+        can_access BOOLEAN NOT NULL DEFAULT TRUE,
+        PRIMARY KEY (role_key, page_key)
     )""",
 ]
 
@@ -402,6 +422,22 @@ def valid_password(p):
 def _init_db(url):
     for stmt in SCHEMA_SQL:
         db_query(stmt)
+
+    # Seed built-in roles without overwriting administrator customizations.
+    for _key, _name in (("admin", "Administrator"), ("operator", "Operator"), ("viewer", "Viewer")):
+        db_query(
+            "INSERT INTO roles (role_key, display_name, is_system) VALUES (%s,%s,TRUE) "
+            "ON CONFLICT (role_key) DO NOTHING",
+            (_key, _name),
+        )
+    for _role, _pages in DEFAULT_ROLE_PERMISSIONS.items():
+        for _page in APP_PAGE_KEYS:
+            db_query(
+                "INSERT INTO role_permissions (role_key, page_key, can_access) VALUES (%s,%s,%s) "
+                "ON CONFLICT (role_key, page_key) DO NOTHING",
+                (_role, _page, _page in _pages),
+            )
+
     if not db_query("SELECT 1 FROM users LIMIT 1"):
         bu = str(_secret("bootstrap_admin", "username", "")).strip().lower()
         bp = str(_secret("bootstrap_admin", "password", ""))
@@ -445,6 +481,171 @@ def audit(action, detail="", username=None):
         pass
 
 
+# ---------- role and permission helpers ----------
+_ROLE_ACCESS_CACHE = {}
+_ROLE_LABEL_CACHE = {}
+
+
+def list_roles():
+    return db_query(
+        "SELECT role_key, display_name, is_system, created_at FROM roles "
+        "ORDER BY CASE role_key WHEN 'admin' THEN 0 WHEN 'operator' THEN 1 WHEN 'viewer' THEN 2 ELSE 3 END, display_name"
+    )
+
+
+def role_exists(role_key):
+    if not DB_ACTIVE:
+        return False
+    return bool(db_query("SELECT 1 FROM roles WHERE role_key=%s", (role_key,)))
+
+
+def role_label(role):
+    if role in _ROLE_LABEL_CACHE:
+        return _ROLE_LABEL_CACHE[role]
+    fallback = {
+        "admin": L("Administrator", "Administrator"),
+        "operator": L("Operator", "Operator"),
+        "viewer": L("Viewer (read-only)", "Pengamat (hanya lihat)"),
+    }
+    if DB_ACTIVE:
+        try:
+            rows = db_query("SELECT display_name FROM roles WHERE role_key=%s", (role,))
+            if rows:
+                _ROLE_LABEL_CACHE[role] = rows[0]["display_name"]
+                return _ROLE_LABEL_CACHE[role]
+        except Exception:
+            pass
+    _ROLE_LABEL_CACHE[role] = fallback.get(role, role)
+    return _ROLE_LABEL_CACHE[role]
+
+
+def page_label(page_key):
+    return {
+        "overview": L("Overview", "Ringkasan"),
+        "monitoring": L("Sensor Monitoring", "Monitoring Sensor"),
+        "prediction": L("Prediction & Recommendation", "Prediksi & Rekomendasi"),
+        "alerts": L("Alerts", "Peringatan"),
+        "operator": L("Operator Decision", "Keputusan Operator"),
+    }.get(page_key, page_key)
+
+
+def get_role_pages(role_key):
+    """Ambil daftar tab yang diizinkan untuk role; admin selalu memiliki akses penuh."""
+    if role_key == "admin":
+        return list(APP_PAGE_KEYS)
+    if role_key in _ROLE_ACCESS_CACHE:
+        return list(_ROLE_ACCESS_CACHE[role_key])
+    if not DB_ACTIVE:
+        return []
+    rows = db_query(
+        "SELECT page_key FROM role_permissions WHERE role_key=%s AND can_access=TRUE",
+        (role_key,),
+    )
+    _ROLE_ACCESS_CACHE[role_key] = [r["page_key"] for r in rows if r["page_key"] in APP_PAGE_KEYS]
+    return list(_ROLE_ACCESS_CACHE[role_key])
+
+
+def can_access_page(page_key, user=None):
+    u = user or current_user()
+    if not u:
+        return False
+    if page_key == "account":
+        return True
+    if page_key == "admin":
+        return u.get("role") == "admin"
+    if page_key not in APP_PAGE_KEYS:
+        return False
+    if u.get("role") == "admin":
+        return True
+    try:
+        return page_key in get_role_pages(u.get("role", ""))
+    except Exception:
+        return False
+
+
+def _first_accessible_page(user=None):
+    u = user or current_user()
+    for _key in APP_PAGE_KEYS:
+        if can_access_page(_key, u):
+            return _key
+    return "account"
+
+
+def create_role(display_name, pages):
+    """Buat role custom; role_key dibuat otomatis dari nama role."""
+    if not is_admin():
+        return "forbidden", None
+    name = (display_name or "").strip()
+    if len(name) < 2 or len(name) > 60:
+        return "bad_role_name", None
+    role_key = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")[:32].strip("_")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{1,31}", role_key or ""):
+        return "bad_role_name", None
+    if role_exists(role_key):
+        return "role_exists", None
+    allowed = [p for p in (pages or []) if p in APP_PAGE_KEYS]
+    try:
+        db_query(
+            "INSERT INTO roles (role_key, display_name, is_system) VALUES (%s,%s,FALSE)",
+            (role_key, name),
+        )
+        for page_key in APP_PAGE_KEYS:
+            db_query(
+                "INSERT INTO role_permissions (role_key, page_key, can_access) VALUES (%s,%s,%s)",
+                (role_key, page_key, page_key in allowed),
+            )
+        _ROLE_ACCESS_CACHE[role_key] = list(allowed)
+        _ROLE_LABEL_CACHE[role_key] = name
+        audit("role_create", f"{role_key}: {','.join(allowed)}")
+        return None, role_key
+    except Exception:
+        return "db", None
+
+
+def save_role_access(role_key, pages):
+    """Simpan daftar tab untuk role. Hak admin tidak dapat dikurangi."""
+    if not is_admin():
+        return "forbidden"
+    if not role_exists(role_key):
+        return "bad_role"
+    if role_key == "admin":
+        return "system_role"
+    allowed = list(dict.fromkeys(p for p in (pages or []) if p in APP_PAGE_KEYS))
+    try:
+        db_query("DELETE FROM role_permissions WHERE role_key=%s", (role_key,))
+        for page_key in APP_PAGE_KEYS:
+            db_query(
+                "INSERT INTO role_permissions (role_key, page_key, can_access) VALUES (%s,%s,%s)",
+                (role_key, page_key, page_key in allowed),
+            )
+        _ROLE_ACCESS_CACHE[role_key] = list(allowed)
+        audit("role_permissions_update", f"{role_key}: {','.join(allowed)}")
+        return None
+    except Exception:
+        return "db"
+
+
+def delete_role(role_key):
+    if not is_admin():
+        return "forbidden"
+    try:
+        row = db_query("SELECT is_system FROM roles WHERE role_key=%s", (role_key,))
+        if not row:
+            return "bad_role"
+        if row[0]["is_system"] or role_key in SYSTEM_ROLES:
+            return "system_role"
+        used = db_query("SELECT COUNT(*) AS n FROM users WHERE role=%s", (role_key,))
+        if int(used[0]["n"]) > 0:
+            return "role_in_use"
+        db_query("DELETE FROM roles WHERE role_key=%s", (role_key,))
+        _ROLE_ACCESS_CACHE.pop(role_key, None)
+        _ROLE_LABEL_CACHE.pop(role_key, None)
+        audit("role_delete", role_key)
+        return None
+    except Exception:
+        return "db"
+
+
 # ---------- pengguna ----------
 def get_user(username):
     rows = db_query("SELECT * FROM users WHERE username=%s", ((username or "").strip().lower(),))
@@ -457,7 +658,7 @@ def authenticate(username, password):
         u = (username or "").strip().lower()
         row = get_user(u)
         if row is None:
-            verify_password(password or "", _dummy_hash())   # samakan waktu respons
+            verify_password(password or "", _dummy_hash())
             audit("login_fail", "username tidak dikenal", username=u or "-")
             return None, "invalid"
         if time.time() < float(row["locked_until"]):
@@ -466,8 +667,12 @@ def authenticate(username, password):
         if row["active"] and verify_password(password or "", row["password_hash"]):
             db_query("UPDATE users SET failed_count=0, locked_until=0 WHERE username=%s", (u,))
             audit("login_ok", "", username=u)
-            return {"username": row["username"], "display_name": row["display_name"] or row["username"],
-                    "role": row["role"]}, None
+            return {
+                "username": row["username"],
+                "display_name": row["display_name"] or row["username"],
+                "role": row["role"],
+                "avatar_data": row.get("avatar_data"),
+            }, None
         fails = int(row["failed_count"]) + 1
         locked = time.time() + LOCK_SECONDS if fails >= MAX_FAILS else 0
         db_query("UPDATE users SET failed_count=%s, locked_until=%s WHERE username=%s",
@@ -479,7 +684,7 @@ def authenticate(username, password):
 
 
 def refresh_user():
-    """Cek ulang peran/status pengguna di database (mis. dinonaktifkan admin saat sesi berjalan)."""
+    """Cek ulang status, role, nama, dan foto pengguna dari database."""
     u = current_user()
     if not u or not DB_ACTIVE:
         return u
@@ -490,35 +695,74 @@ def refresh_user():
     if not row or not row["active"]:
         st.session_state["user"] = None
         return None
-    u["role"], u["display_name"] = row["role"], row["display_name"] or row["username"]
+    u["role"] = row["role"]
+    u["display_name"] = row["display_name"] or row["username"]
+    u["avatar_data"] = row.get("avatar_data")
     return u
-
-
-def can_decide():
-    if DEMO_MODE:
-        return True
-    u = current_user()
-    return bool(u) and DB_ACTIVE and u["role"] in ("admin", "operator")
 
 
 def is_admin():
     u = current_user()
-    return bool(u) and DB_ACTIVE and u["role"] == "admin"
+    return bool(u) and DB_ACTIVE and u.get("role") == "admin"
+
+
+def can_decide():
+    u = current_user()
+    return bool(u) and DB_ACTIVE and can_access_page("operator", u)
 
 
 def logout():
     audit("logout")
     st.session_state["user"] = None
-    st.session_state["page"] = "overview"
+    st.session_state["page"] = "login"
+    st.session_state.pop("pending_recommendation", None)
+    st.session_state.pop("show_modify", None)
 
 
-def role_label(role):
-    return {
-        "admin": L("Administrator", "Administrator"),
-        "operator": L("Operator", "Operator"),
-        "viewer": L("Viewer (read-only)", "Pengamat (hanya lihat)"),
-    }.get(role, role)
+def update_own_profile(display_name, avatar_data):
+    u = current_user()
+    if not u or not DB_ACTIVE:
+        return "forbidden"
+    name = (display_name or "").strip()
+    if not name or len(name) > 60:
+        return "bad_display_name"
+    try:
+        db_query(
+            "UPDATE users SET display_name=%s, avatar_data=%s WHERE username=%s",
+            (name, avatar_data, u["username"]),
+        )
+        u["display_name"] = name
+        u["avatar_data"] = avatar_data
+        audit("profile_update", "display name and profile photo updated")
+        return None
+    except Exception:
+        return "db"
 
+
+def avatar_data_from_upload(uploaded_file):
+    """Validasi, resize, dan kompres foto profil menjadi data URL JPEG."""
+    if uploaded_file is None:
+        return None, None
+    raw = uploaded_file.getvalue()
+    if len(raw) > 5 * 1024 * 1024:
+        return None, "image_too_large"
+    try:
+        with Image.open(io.BytesIO(raw)) as source_image:
+            image = ImageOps.exif_transpose(source_image)
+            image.thumbnail((512, 512))
+            if image.mode in ("RGBA", "LA"):
+                rgba = image.convert("RGBA")
+                background = Image.new("RGB", rgba.size, (255, 255, 255))
+                background.paste(rgba, mask=rgba.getchannel("A"))
+                image = background
+            else:
+                image = image.convert("RGB")
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=84, optimize=True)
+        encoded = base64.b64encode(output.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{encoded}", None
+    except Exception:
+        return None, "invalid_image"
 
 def auth_msg(code):
     return {
@@ -532,6 +776,13 @@ def auth_msg(code):
         "bad_password": L("Password must be at least 8 characters.", "Kata sandi minimal 8 karakter."),
         "exists": L("That username already exists.", "Nama pengguna itu sudah ada."),
         "bad_role": L("Invalid role.", "Peran tidak valid."),
+        "bad_role_name": L("Role name must contain 2-60 characters and produce a valid role key.", "Nama role harus 2-60 karakter dan menghasilkan kode role yang valid."),
+        "role_exists": L("A role with this name already exists.", "Role dengan nama tersebut sudah ada."),
+        "role_in_use": L("This role is assigned to one or more users. Reassign those users before deleting it.", "Role ini masih digunakan satu atau lebih pengguna. Pindahkan pengguna tersebut sebelum menghapusnya."),
+        "system_role": L("This built-in role cannot be deleted or edited here.", "Role bawaan ini tidak dapat dihapus atau diubah di sini."),
+        "bad_display_name": L("Display name is required and must be 60 characters or fewer.", "Display name wajib diisi dan maksimal 60 karakter."),
+        "image_too_large": L("Image is larger than 5 MB. Choose a smaller image.", "Ukuran foto lebih dari 5 MB. Pilih foto yang lebih kecil."),
+        "invalid_image": L("The selected file is not a supported image.", "File yang dipilih bukan gambar yang didukung."),
         "last_admin": L("You cannot remove the last active administrator.",
                         "Administrator aktif terakhir tidak boleh dihapus/dinonaktifkan."),
         "self": L("You cannot change your own role or deactivate yourself here.",
@@ -551,7 +802,7 @@ def create_user(username, display_name, role, password):
         return "bad_username"
     if not valid_password(password):
         return "bad_password"
-    if role not in ROLES:
+    if not role_exists(role):
         return "bad_role"
     try:
         if get_user(username):
@@ -580,7 +831,7 @@ def update_user(username, role=None, active=None):
             return "invalid"
         if username == current_user()["username"]:
             return "self"
-        if role is not None and role not in ROLES:
+        if role is not None and not role_exists(role):
             return "bad_role"
         new_role = role if role is not None else target["role"]
         new_active = active if active is not None else bool(target["active"])
@@ -908,6 +1159,7 @@ SENSORS = [
 ]
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def generate_sensor_readings(hours=168, seed=7):
     """
     PROTOTYPE: membangkitkan pembacaan sensor SIMULASI per jam.
@@ -1023,6 +1275,7 @@ def sensor_status_table(sensor_df, offline_after_hours=3):
 # ============================================================
 BASE_DIR = Path(__file__).resolve().parent
 LOGO_PATH = BASE_DIR / "assets" / "somat_logo.png"
+IRRIGATION_LOGIN_PATH = BASE_DIR / "assets" / "irrigation_login.jpg"
 PLOTLY_CONFIG = {
     # Semua kontrol modebar tetap tersedia kecuali tombol Zoom (ikon kaca pembesar).
     # Drag default tetap untuk zoom timeframe; tombol Pan bersifat toggle.
@@ -1034,7 +1287,7 @@ PLOTLY_CONFIG = {
 }
 
 if "page" not in st.session_state:
-    st.session_state["page"] = "overview"
+    st.session_state["page"] = "login"
 if "light_mode" not in st.session_state:
     st.session_state["light_mode"] = False
 if "decision_log" not in st.session_state:
@@ -1130,6 +1383,20 @@ LOGO_FALLBACK = (
 
 logo_b64 = _logo_b64()
 LOGO_SRC = f"data:image/png;base64,{logo_b64}" if logo_b64 else LOGO_FALLBACK
+
+
+def _irrigation_image_b64():
+    for candidate in (IRRIGATION_LOGIN_PATH, BASE_DIR / "irrigation_login.jpg", Path.cwd() / "assets" / "irrigation_login.jpg"):
+        try:
+            if candidate.exists():
+                return base64.b64encode(candidate.read_bytes()).decode("ascii")
+        except OSError:
+            pass
+    return ""
+
+
+_irrigation_b64 = _irrigation_image_b64()
+IRRIGATION_SRC = f"data:image/jpeg;base64,{_irrigation_b64}" if _irrigation_b64 else ""
 
 # Warna seri yang jelas terlihat di mode gelap maupun terang.
 SERIES_COLORS = ["#22A55B", "#2F80ED", "#E87924", "#A855F7", "#E4565C", "#06B6D4"]
@@ -2082,9 +2349,34 @@ st.markdown(
       .side-info-muted{{color:{THEME['muted']};font-size:.77rem;line-height:1.45;margin-bottom:6px;}}
       .side-info-line{{font-size:.82rem;line-height:1.55;color:{THEME['text']};}}
       .side-flow{{font-size:.81rem;line-height:1.55;color:{THEME['text']};letter-spacing:.002em;}}
+      .side-profile{{display:flex;align-items:center;gap:11px;background:{THEME['panel2']};border:1px solid {THEME['border']};border-radius:14px;padding:10px 12px;margin-top:12px;min-width:0;}}
+      .side-profile img,.side-profile-fallback{{width:42px;height:42px;min-width:42px;border-radius:50%;object-fit:cover;border:1px solid {THEME['border']};background:{THEME['panel']};}}
+      .side-profile-fallback{{display:grid;place-items:center;font-weight:850;font-size:1rem;color:#fff!important;background:linear-gradient(135deg,#2563EB,#16A34A);}}
+      .side-profile-name{{font-size:.91rem;font-weight:820;line-height:1.25;overflow-wrap:anywhere;color:{THEME['text']};}}
+      .side-profile-caption{{font-size:.72rem;color:{THEME['muted']};margin-top:3px;}}
+      .side-profile-mini{{display:flex;justify-content:center;margin:10px 0 4px;}}
+      .side-profile-mini img,.side-profile-mini .side-profile-fallback{{width:40px;height:40px;border-radius:50%;object-fit:cover;}}
+      .login-visual{{min-height:560px;height:100%;border-radius:24px;overflow:hidden;padding:26px 30px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:space-between;background-color:#0B1830;background-size:cover;background-position:center;box-shadow:0 18px 50px rgba(2,8,23,.22);}}
+      .login-visual-brand{{display:flex;align-items:center;gap:12px;color:#fff;text-shadow:0 2px 12px rgba(0,0,0,.3);}}
+      .login-visual-brand img{{width:66px;height:66px;object-fit:contain;filter:drop-shadow(0 4px 12px rgba(0,0,0,.25));}}
+      .login-visual-brand strong{{display:block;font-size:1.3rem;letter-spacing:.04em;}}
+      .login-visual-brand span{{display:block;font-size:.72rem;opacity:.9;max-width:260px;line-height:1.35;}}
+      .login-visual-copy{{max-width:570px;color:#fff;text-shadow:0 2px 16px rgba(0,0,0,.35);}}
+      .login-visual-copy small{{font-size:.72rem;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:#BFE9FF;}}
+      .login-visual-copy h2{{font-size:clamp(1.8rem,3vw,2.8rem);line-height:1.08;font-weight:850;letter-spacing:-.035em;color:#fff;margin:.65rem 0;}}
+      .login-visual-copy p{{font-size:.98rem;line-height:1.6;color:rgba(255,255,255,.92);max-width:500px;margin:0;}}
+      .login-visual-foot{{font-size:.75rem;color:rgba(255,255,255,.82);letter-spacing:.03em;}}
+      .login-panel-brand{{display:flex;align-items:center;gap:12px;margin:2.4rem 0 1.5rem;}}
+      .login-panel-brand img{{width:62px;height:62px;object-fit:contain;}}
+      .login-panel-brand strong{{font-size:1.2rem;font-weight:900;letter-spacing:.035em;color:{THEME['text']};}}
+      .login-panel-brand span{{display:block;font-size:.74rem;color:{THEME['muted']};line-height:1.35;}}
+      .st-key-login_form [data-testid="stForm"],.st-key-login_form[data-testid="stForm"]{{background:{THEME['panel']};border:1px solid {THEME['border']};border-radius:18px;padding:1.15rem 1.25rem;box-shadow:0 12px 30px rgba(2,8,23,{'.16' if IS_DARK else '.06'});}}
+      .st-key-login_form [data-testid="stFormSubmitButton"] button{{width:100%;min-height:44px;border-radius:11px;font-weight:800;}}
       div[data-testid="stExpander"]{{border-color:{THEME['border']};background:{THEME['panel']};border-radius:12px;}}
       [data-testid="stDataFrame"]{{border:1px solid {THEME['border']};border-radius:12px;overflow:hidden;}}
       [data-testid="stPlotlyChart"]{{border:1px solid {THEME['border']};border-radius:16px;background:{THEME['panel']};overflow:hidden;box-shadow:0 7px 20px rgba(2,8,23,{'.15' if IS_DARK else '.05'});}}
+      .main .block-container{{animation:somatContentIn .16s ease-out;}}
+      @keyframes somatContentIn{{from{{opacity:.94;transform:translateY(2px)}}to{{opacity:1;transform:translateY(0)}}}}
       .somat-header{{display:flex;align-items:center;gap:14px;margin:0 0 10px;padding:4px 0 2px;}}
       @media(min-width:801px){{.somat-header{{padding-right:8.5rem;}}}}
       .somat-header img{{width:78px;height:70px;object-fit:contain;flex:0 0 auto;filter:drop-shadow(0 5px 14px rgba(0,90,160,.12));}}
@@ -2130,15 +2422,17 @@ def _toggle_lang():
     st.query_params["lang"] = new
 
 
-# Icon menunjukkan mode tujuan: matahari = pindah ke light, bulan = pindah ke dark.
+def _set_page(page_id):
+    st.session_state["page"] = page_id
+
+
+# Theme and language controls remain available on the login screen.
 st.button(
     "Toggle theme",
     key="theme_icon",
     help=L("Switch to light mode", "Ganti ke light mode") if IS_DARK else L("Switch to dark mode", "Ganti ke dark mode"),
     on_click=_toggle_theme,
 )
-
-# Pilihan bahasa: English (default) / Indonesia.
 st.button(
     f"🌐 {LANG.upper()}",
     key="lang_btn",
@@ -2146,32 +2440,71 @@ st.button(
     on_click=_toggle_lang,
 )
 
-# Halaman pertama wajib login. Jangan render sidebar maupun dashboard
-# sebelum identitas pengguna berhasil diverifikasi melalui Neon.
+
+def render_login_screen():
+    'Login menjadi layar pertama; sidebar dan konten dashboard belum dirender.'
+    st.markdown('<div class="login-page-spacer"></div>', unsafe_allow_html=True)
+    left, right = st.columns([1.18, 0.82], gap="large", vertical_alignment="center")
+    with left:
+        if IRRIGATION_SRC:
+            _bg = f"linear-gradient(180deg,rgba(5,18,38,.20) 0%,rgba(5,18,38,.84) 100%),url('{IRRIGATION_SRC}')"
+        else:
+            _bg = "linear-gradient(135deg,#0B3B65,#0F766E)"
+        st.markdown(
+            f'''<section class="login-visual" style="background-image:{_bg};">
+              <div class="login-visual-brand"><img src="{LOGO_SRC}" alt="SOMAT logo"><div>
+                <strong>SOMAT</strong><span>Smart Adaptive Irrigation Management System</span>
+              </div></div>
+              <div class="login-visual-copy"><small>SMART IRRIGATION · DATA · DECISION</small>
+                <h2>{L("Smarter water management starts with better decisions.", "Pengelolaan air yang lebih cerdas dimulai dari keputusan yang lebih baik.")}</h2>
+                <p>{L("Monitor field conditions, review irrigation recommendations, and keep operational decisions under human control.", "Pantau kondisi lahan, tinjau rekomendasi irigasi, dan pastikan keputusan operasional tetap berada di bawah kendali manusia.")}</p>
+              </div>
+              <div class="login-visual-foot">SOMAT · Smart Adaptive Irrigation Management System</div>
+            </section>''',
+            unsafe_allow_html=True,
+        )
+    with right:
+        st.markdown(
+            f'''<div class="login-panel-brand"><img src="{LOGO_SRC}" alt="Logo SOMAT"><div>
+              <strong>SOMAT</strong><span>Smart Adaptive Irrigation Management System</span>
+            </div></div>''',
+            unsafe_allow_html=True,
+        )
+        st.header(L("Welcome back", "Selamat datang kembali"))
+        st.caption(L("Sign in with your registered account to access the dashboard.", "Masuk menggunakan akun terdaftar untuk mengakses dashboard."))
+        render_login_form("login_form")
+        st.caption(L("Access is managed by the SOMAT administrator.", "Hak akses dikelola oleh administrator SOMAT."))
+
+
+# Login gate: no dashboard, sidebar, or application data is rendered before authentication.
 if not DB_ACTIVE:
     st.session_state["user"] = None
 else:
     refresh_user()
 
 if not current_user():
-    # Gaya dashboard tetap dipakai, tetapi sidebar khusus dashboard
-    # disembunyikan selama pengguna berada di halaman masuk.
-    st.markdown(
-        """<style>
-        [data-testid="stSidebar"],
-        [data-testid="stSidebarCollapsedControl"],
-        [data-testid="stExpandSidebarButton"],
-        [data-testid="stSidebarCollapseButton"] {display: none !important;}
-        </style>""",
-        unsafe_allow_html=True,
-    )
-    st.header(L("🔐 Sign in", "🔐 Masuk"))
-    st.caption(L("Only registered users can record decisions. Accounts are created by an administrator.",
-                 "Hanya pengguna terdaftar yang dapat mencatat keputusan. Akun dibuat oleh administrator."))
-    render_login_form("login_page_form")
+    st.session_state["page"] = "login"
+    render_login_screen()
     st.stop()
 
-# FIX 1: satu-satunya tombol buka/tutup sidebar di desktop (selalu terlihat).
+# Once authenticated, enforce tab-level access on every server request.
+_u_gate = refresh_user()
+if not _u_gate:
+    st.session_state["page"] = "login"
+    render_login_screen()
+    st.stop()
+
+_pg = st.session_state.get("page", "overview")
+if _pg == "login":
+    st.session_state["page"] = "overview"
+elif _pg == "account":
+    pass
+elif _pg == "admin" and not is_admin():
+    st.session_state["page"] = _first_accessible_page(_u_gate)
+elif _pg not in APP_PAGE_KEYS or not can_access_page(_pg, _u_gate):
+    st.session_state["page"] = _first_accessible_page(_u_gate)
+
+# One compact custom sidebar toggle is shown only after login.
 st.button(
     "Toggle sidebar",
     key="sb_toggle",
@@ -2179,26 +2512,18 @@ st.button(
     on_click=_toggle_sidebar,
 )
 
-# Penjaga halaman: akun hanya untuk pengguna masuk, administrasi hanya untuk admin.
-_pg = st.session_state["page"]
-if (_pg == "login") \
-        or (_pg == "account" and not st.session_state.get("user")) \
-        or (_pg == "admin" and not is_admin()):
-    st.session_state["page"] = "overview"
-
-# ---------------- Sidebar ----------------
-# ID halaman bersifat netral-bahasa; label menu mengikuti bahasa aktif.
-nav_items = [
+# ---------------- Role-aware sidebar ----------------
+_PAGE_NAV = [
     ("overview", "📊", L("Overview", "Ringkasan")),
     ("monitoring", "📡", L("Sensor Monitoring", "Monitoring Sensor")),
     ("prediction", "💧", L("Prediction & Recommendation", "Prediksi & Rekomendasi")),
     ("alerts", "🚨", L("Alerts", "Peringatan")),
     ("operator", "👷", L("Operator Decision", "Keputusan Operator")),
 ]
-if st.session_state.get("user"):
-    nav_items.append(("account", "👤", L("My Account", "Akun Saya")))
-    if is_admin():
-        nav_items.append(("admin", "🛡️", L("Admin", "Administrasi")))
+nav_items = [(pid, icon, label) for pid, icon, label in _PAGE_NAV if can_access_page(pid)]
+nav_items.append(("account", "👤", L("My Account", "Akun Saya")))
+if is_admin():
+    nav_items.append(("admin", "🛡️", L("Admin", "Administrasi")))
 
 with st.sidebar:
     if COLLAPSED:
@@ -2223,32 +2548,42 @@ with st.sidebar:
 
     for page_id, icon, label in nav_items:
         selected = st.session_state["page"] == page_id
-        if st.button(
+        st.button(
             icon if COLLAPSED else f"{icon}  {label}",
             key=f"nav_{page_id}",
             help=label if COLLAPSED else None,
             type="primary" if selected else "secondary",
             width="stretch",
-        ):
-            st.session_state["page"] = page_id
-            st.rerun()
+            on_click=_set_page,
+            args=(page_id,),
+        )
 
     _u = current_user()
     if _u:
-        if not COLLAPSED:
+        _avatar_data = _u.get("avatar_data") or ""
+        _safe_avatar = html.escape(_avatar_data, quote=True)
+        _initial = html.escape((_u.get("display_name") or _u.get("username", "S"))[:1].upper())
+        if _safe_avatar:
+            _avatar_markup = f'<img src="{_safe_avatar}" alt="Profile picture">'
+        else:
+            _avatar_markup = f'<div class="side-profile-fallback">{_initial}</div>'
+        if COLLAPSED:
+            st.markdown(f'<div class="side-profile-mini">{_avatar_markup}</div>', unsafe_allow_html=True)
+        else:
             st.markdown(
-                f"""<div class="side-info-card"><div class="side-info-title">👤 <span>{html.escape(_u["display_name"])}</span></div>
-                <div class="side-info-muted">{html.escape(role_label(_u["role"]))}</div></div>""",
+                f"""<div class="side-profile">{_avatar_markup}<div style="min-width:0;">
+                  <div class="side-profile-name">{html.escape(_u.get("display_name") or _u.get("username", ""))}</div>
+                  <div class="side-profile-caption">{L("Signed in", "Sedang masuk")}</div>
+                </div></div>""",
                 unsafe_allow_html=True,
             )
-        if st.button(
+        st.button(
             "🚪" if COLLAPSED else "🚪  " + L("Sign out", "Keluar"),
             key="nav_logout",
             help=L("Sign out", "Keluar") if COLLAPSED else None,
             width="stretch",
-        ):
-            logout()
-            st.rerun()
+            on_click=logout,
+        )
 
     if not COLLAPSED:
         st.markdown(
@@ -2577,23 +2912,9 @@ elif page == "operator":
     if _u:
         st.caption(L(f"Signed in as **{_u['display_name']}** ({role_label(_u['role'])})",
                      f"Masuk sebagai **{_u['display_name']}** ({role_label(_u['role'])})"))
-    if DEMO_MODE:
-        st.info(L("Demo mode: the database is not configured, so no login is required and decisions are kept for this session only.",
-                  "Mode demo: database belum dikonfigurasi, jadi tidak perlu login dan keputusan hanya disimpan selama sesi ini."))
-    elif not DB_ACTIVE:
-        st.error(auth_msg("db") + " " + L("Decisions cannot be recorded right now.", "Keputusan tidak dapat dicatat saat ini."))
     if st.session_state.pop("db_error", False):
         st.warning(L("The database could not be reached; the latest data is shown for this session only.",
                      "Database tidak dapat dihubungi; data terbaru hanya tampil untuk sesi ini."))
-
-    # Pesan konfirmasi dari keputusan sebelumnya (ditampilkan setelah st.rerun)
-    if "flash" in st.session_state:
-        _flash = st.session_state.pop("flash")
-        st.success({
-            "approve": L("✅ Decision recorded: APPROVE", "✅ Keputusan dicatat: APPROVE"),
-            "delay": L("⏸️ Decision recorded: DELAY (irrigation postponed)", "⏸️ Keputusan dicatat: DELAY (irigasi ditunda)"),
-            "modify": L("✏️ Decision recorded: MODIFY", "✏️ Keputusan dicatat: MODIFY"),
-        }.get(_flash, str(_flash)))
 
     def _record(decision, mm, hours, note_text, flash):
         """Cek ulang izin (peran bisa berubah saat sesi) lalu catat keputusan."""
@@ -2603,8 +2924,11 @@ elif page == "operator":
             return
         st.session_state["show_modify"] = False
         log_decision(decision, recommendation, mm, hours, note_text)
-        st.session_state["flash"] = flash
-        st.rerun()
+        st.success({
+            "approve": L("✅ Decision recorded: APPROVE", "✅ Keputusan dicatat: APPROVE"),
+            "delay": L("⏸️ Decision recorded: DELAY (irrigation postponed)", "⏸️ Keputusan dicatat: DELAY (irigasi ditunda)"),
+            "modify": L("✏️ Decision recorded: MODIFY", "✏️ Keputusan dicatat: MODIFY"),
+        }.get(flash, str(flash)))
 
     if can_decide():
         if "pending_recommendation" in st.session_state:
@@ -2645,9 +2969,10 @@ elif page == "operator":
     elif not _u:
         if DB_ACTIVE:
             st.info(L("Please sign in as an operator to record decisions.", "Silakan masuk sebagai operator untuk mencatat keputusan."))
+            render_login_form("op_login_form")
     elif DB_ACTIVE:
-        st.warning(L("Your role is read-only (viewer). Only operators and administrators can record decisions.",
-                     "Peran Anda hanya-lihat. Hanya operator dan administrator yang dapat mencatat keputusan."))
+        st.warning(L("Your role can view this tab but does not have permission to record decisions. Ask an administrator to grant the Operator Decision access.",
+                     "Role Anda dapat melihat tab ini, tetapi belum memiliki izin untuk mencatat keputusan. Minta administrator memberikan akses Keputusan Operator."))
 
     st.header(L("🔄 Feedback Loop", "🔄 Umpan Balik (Feedback Loop)"))
     st.caption(L("Simulated field response (prototype). Not field measurements.", "Respons lapangan simulasi (prototype). Bukan hasil pengukuran lapangan."))
@@ -2673,9 +2998,7 @@ elif page == "operator":
 
     st.subheader(L("📋 Decision History (saved permanently)", "📋 Riwayat Keputusan (tersimpan permanen)")
                  if DB_ACTIVE else L("📋 Decision History (this session only)", "📋 Riwayat Keputusan (sesi ini saja)"))
-    if not (DEMO_MODE or _u):
-        st.info(L("Sign in to view the decision history.", "Masuk untuk melihat riwayat keputusan."))
-    else:
+    if _u:
         _hist = decision_log_df()
         if len(_hist):
             render_interactive_table(_hist, key="decision_history", hide_index=True)
@@ -2692,8 +3015,55 @@ elif page == "account":
     if not _u:
         st.info(L("Please sign in.", "Silakan masuk."))
     else:
-        st.write(L(f"Username: **{_u['username']}**", f"Nama pengguna: **{_u['username']}**"))
-        st.write(L(f"Role: **{role_label(_u['role'])}**", f"Peran: **{role_label(_u['role'])}**"))
+        st.caption(L("Manage the name and profile photo shown in the sidebar.", "Atur nama dan foto profil yang ditampilkan di sidebar."))
+        profile_left, profile_right = st.columns([0.8, 1.7], gap="large")
+        with profile_left:
+            if _u.get("avatar_data"):
+                try:
+                    _avatar_bytes = base64.b64decode(_u["avatar_data"].split(",", 1)[1])
+                    st.image(_avatar_bytes, width=150)
+                except Exception:
+                    st.info(L("Profile photo preview is unavailable.", "Pratinjau foto profil tidak tersedia."))
+            else:
+                _initial = html.escape((_u.get("display_name") or _u["username"])[0].upper())
+                st.markdown(
+                    f'<div class="side-profile-fallback" style="width:112px;height:112px;font-size:2rem;">{_initial}</div>',
+                    unsafe_allow_html=True,
+                )
+            st.write(f"**{_u['username']}**")
+            st.caption(role_label(_u["role"]))
+        with profile_right:
+            with st.form("profile_form", clear_on_submit=False):
+                _display_name = st.text_input(
+                    L("Display name", "Nama tampilan"),
+                    value=_u.get("display_name") or _u["username"],
+                    max_chars=60,
+                )
+                _photo_upload = st.file_uploader(
+                    L("Profile picture", "Foto profil"),
+                    type=["png", "jpg", "jpeg", "webp"],
+                    help=L("Maximum 5 MB. The image is resized automatically.", "Maksimal 5 MB. Foto akan diperkecil secara otomatis."),
+                )
+                _remove_photo = st.checkbox(L("Remove current photo", "Hapus foto saat ini"), value=False)
+                _save_profile = st.form_submit_button(L("Save profile", "Simpan profil"), type="primary")
+            if _save_profile:
+                _new_avatar = _u.get("avatar_data")
+                _avatar_error = None
+                if _remove_photo:
+                    _new_avatar = None
+                elif _photo_upload is not None:
+                    _new_avatar, _avatar_error = avatar_data_from_upload(_photo_upload)
+                if _avatar_error:
+                    st.error(auth_msg(_avatar_error))
+                else:
+                    _profile_error = update_own_profile(_display_name, _new_avatar)
+                    if _profile_error:
+                        st.error(auth_msg(_profile_error))
+                    else:
+                        st.success(L("Profile updated.", "Profil berhasil diperbarui."))
+                        st.rerun()
+
+        st.divider()
         st.subheader(L("Change password", "Ganti kata sandi"))
         with st.form("pw_form", clear_on_submit=True):
             _cur = st.text_input(L("Current password", "Kata sandi saat ini"), type="password")
@@ -2719,10 +3089,16 @@ elif page == "admin":
     else:
         if "adm_flash" in st.session_state:
             st.success(st.session_state.pop("adm_flash"))
-        tab_users, tab_audit = st.tabs([L("Users", "Pengguna"), L("Audit log", "Log audit")])
+        tab_users, tab_roles, tab_audit = st.tabs([
+            L("Users", "Pengguna"),
+            L("Roles & access", "Role & hak akses"),
+            L("Audit log", "Log audit"),
+        ])
 
         with tab_users:
             _users = list_users()
+            _role_rows = list_roles()
+            _role_keys = [r["role_key"] for r in _role_rows]
             render_interactive_table(pd.DataFrame([{
                 L("Username", "Nama pengguna"): r["username"],
                 L("Name", "Nama"): r["display_name"],
@@ -2732,12 +3108,16 @@ elif page == "admin":
             } for r in _users]), key="admin_users", hide_index=True)
 
             st.subheader(L("➕ Add user", "➕ Tambah pengguna"))
+            _default_role = "operator" if "operator" in _role_keys else next((r for r in _role_keys if r != "admin"), _role_keys[0])
             with st.form("add_user_form", clear_on_submit=True):
                 a1, a2 = st.columns(2)
                 nu = a1.text_input(L("Username", "Nama pengguna"))
                 nn = a2.text_input(L("Full name", "Nama lengkap"))
                 a3, a4 = st.columns(2)
-                nr = a3.selectbox(L("Role", "Peran"), ROLES, index=1, format_func=role_label)
+                nr = a3.selectbox(
+                    L("Role", "Peran"), _role_keys,
+                    index=_role_keys.index(_default_role), format_func=role_label,
+                )
                 npw = a4.text_input(L("Initial password (min. 8 characters)", "Kata sandi awal (min. 8 karakter)"), type="password")
                 add_go = st.form_submit_button(L("Create user", "Buat pengguna"), type="primary")
             if add_go:
@@ -2750,35 +3130,116 @@ elif page == "admin":
 
             st.subheader(L("🛠️ Manage user", "🛠️ Kelola pengguna"))
             _names = [r["username"] for r in _users]
-            _sel = st.selectbox(L("Select user", "Pilih pengguna"), _names, key="adm_sel")
-            _row = next(r for r in _users if r["username"] == _sel)
-            m1, m2 = st.columns(2)
-            with m1:
-                _role = st.selectbox(L("Role", "Peran"), ROLES, index=ROLES.index(_row["role"]),
-                                     format_func=role_label, key=f"adm_role_{_sel}")
-                _act = st.checkbox(L("Active", "Aktif"), value=bool(_row["active"]), key=f"adm_act_{_sel}")
-                if st.button(L("Save changes", "Simpan perubahan"), key="adm_save"):
-                    _err = update_user(_sel, _role, _act)
+            if _names:
+                _sel = st.selectbox(L("Select user", "Pilih pengguna"), _names, key="adm_sel")
+                _row = next(r for r in _users if r["username"] == _sel)
+                m1, m2 = st.columns(2)
+                with m1:
+                    _row_role = _row["role"] if _row["role"] in _role_keys else _role_keys[0]
+                    _role = st.selectbox(
+                        L("Role", "Peran"), _role_keys,
+                        index=_role_keys.index(_row_role),
+                        format_func=role_label,
+                        key=f"adm_role_{_sel}",
+                    )
+                    _act = st.checkbox(L("Active", "Aktif"), value=bool(_row["active"]), key=f"adm_act_{_sel}")
+                    if st.button(L("Save changes", "Simpan perubahan"), key="adm_save"):
+                        _err = update_user(_sel, _role, _act)
+                        if _err:
+                            st.error(auth_msg(_err))
+                        else:
+                            st.session_state["adm_flash"] = L("Changes saved.", "Perubahan disimpan.")
+                            st.rerun()
+                with m2:
+                    with st.form("adm_reset_form", clear_on_submit=True):
+                        _rp = st.text_input(L("New password for this user", "Kata sandi baru untuk pengguna ini"), type="password")
+                        _rgo = st.form_submit_button(L("Reset password (also unlocks)", "Reset kata sandi (sekaligus membuka kunci)"))
+                    if _rgo:
+                        _err = reset_password(_sel, _rp)
+                        if _err:
+                            st.error(auth_msg(_err))
+                        else:
+                            st.session_state["adm_flash"] = L(f"Password for '{_sel}' reset.", f"Kata sandi '{_sel}' direset.")
+                            st.rerun()
+            else:
+                st.info(L("No users found.", "Belum ada pengguna."))
+
+        with tab_roles:
+            st.caption(L(
+                "Create custom roles and decide which application tabs each role can open. Account settings remain available to every signed-in user; the Admin tab is reserved for the administrator role.",
+                "Buat role khusus dan tentukan tab aplikasi yang dapat dibuka oleh setiap role. Akun Saya tetap tersedia bagi semua pengguna yang sudah masuk; tab Administrasi hanya untuk role administrator."
+            ))
+            st.subheader(L("➕ Create custom role", "➕ Tambah role khusus"))
+            with st.form("create_role_form", clear_on_submit=True):
+                _new_role_name = st.text_input(L("Role display name", "Nama role"), max_chars=60)
+                _new_role_pages = st.multiselect(
+                    L("Tabs this role can access", "Tab yang dapat diakses role ini"),
+                    options=list(APP_PAGE_KEYS),
+                    default=["overview", "monitoring", "prediction", "alerts"],
+                    format_func=page_label,
+                )
+                _create_role_go = st.form_submit_button(L("Create role", "Buat role"), type="primary")
+            if _create_role_go:
+                _role_error, _created_key = create_role(_new_role_name, _new_role_pages)
+                if _role_error:
+                    st.error(auth_msg(_role_error))
+                else:
+                    st.session_state["adm_flash"] = L(
+                        f"Role '{_new_role_name.strip()}' created with key '{_created_key}'.",
+                        f"Role '{_new_role_name.strip()}' dibuat dengan kode '{_created_key}'."
+                    )
+                    st.rerun()
+
+            st.divider()
+            st.subheader(L("🔐 Configure role access", "🔐 Atur hak akses role"))
+            _role_rows = list_roles()
+            _editable_roles = [r for r in _role_rows if r["role_key"] != "admin"]
+            if _editable_roles:
+                _editable_keys = [r["role_key"] for r in _editable_roles]
+                _selected_role = st.selectbox(
+                    L("Select role", "Pilih role"), _editable_keys,
+                    format_func=role_label, key="role_access_selected",
+                )
+                _selected_record = next(r for r in _editable_roles if r["role_key"] == _selected_role)
+                st.caption(L(f"Role key: `{_selected_role}`", f"Kode role: `{_selected_role}`"))
+                _selected_pages = st.multiselect(
+                    L("Allowed tabs", "Tab yang diizinkan"),
+                    options=list(APP_PAGE_KEYS),
+                    default=get_role_pages(_selected_role),
+                    format_func=page_label,
+                    key=f"role_access_pages_{_selected_role}",
+                )
+                if st.button(L("Save access settings", "Simpan hak akses"), key="save_role_access", type="primary"):
+                    _err = save_role_access(_selected_role, _selected_pages)
                     if _err:
                         st.error(auth_msg(_err))
                     else:
-                        st.session_state["adm_flash"] = L("Changes saved.", "Perubahan disimpan.")
-                        st.rerun()
-            with m2:
-                with st.form("adm_reset_form", clear_on_submit=True):
-                    _rp = st.text_input(L("New password for this user", "Kata sandi baru untuk pengguna ini"), type="password")
-                    _rgo = st.form_submit_button(L("Reset password (also unlocks)", "Reset kata sandi (sekaligus membuka kunci)"))
-                if _rgo:
-                    _err = reset_password(_sel, _rp)
-                    if _err:
-                        st.error(auth_msg(_err))
-                    else:
-                        st.session_state["adm_flash"] = L(f"Password for '{_sel}' reset.", f"Kata sandi '{_sel}' direset.")
+                        st.success(L("Role access updated. The changes apply on the user's next interaction.", "Hak akses role diperbarui. Perubahan berlaku pada interaksi pengguna berikutnya."))
                         st.rerun()
 
+                if not _selected_record["is_system"]:
+                    if st.button(L("Delete this custom role", "Hapus role khusus ini"), key="delete_custom_role"):
+                        _err = delete_role(_selected_role)
+                        if _err:
+                            st.error(auth_msg(_err))
+                        else:
+                            st.success(L("Custom role deleted.", "Role khusus berhasil dihapus."))
+                            st.rerun()
+            st.divider()
+            st.subheader(L("Role overview", "Ringkasan role"))
+            _role_summary = []
+            for _rr in list_roles():
+                _role_summary.append({
+                    L("Role", "Role"): _rr["display_name"],
+                    L("Role key", "Kode role"): _rr["role_key"],
+                    L("Type", "Jenis"): L("Built-in", "Bawaan") if _rr["is_system"] else L("Custom", "Khusus"),
+                    L("Accessible tabs", "Tab yang dapat diakses"): ", ".join(page_label(p) for p in get_role_pages(_rr["role_key"])) or "—",
+                })
+            render_interactive_table(pd.DataFrame(_role_summary), key="admin_roles_summary", hide_index=True)
+
         with tab_audit:
-            st.caption(L("Latest 200 events: sign-ins, decisions and user changes.",
-                         "200 kejadian terbaru: login, keputusan, dan perubahan pengguna."))
+            st.caption(L("Latest 200 events: sign-ins, decisions, user changes, and role-access changes.",
+                         "200 kejadian terbaru: login, keputusan, perubahan pengguna, dan perubahan hak akses role."))
             _aud = fetch_audit()
             if _aud:
                 render_interactive_table(pd.DataFrame([{
@@ -2789,3 +3250,4 @@ elif page == "admin":
                 } for r in _aud]), key="admin_audit", hide_index=True)
             else:
                 st.info(L("No events yet.", "Belum ada kejadian."))
+
