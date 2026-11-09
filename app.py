@@ -4,7 +4,7 @@
 # bukan data penelitian aktual.
 # ============================================================
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import base64
 import hashlib
@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import secrets as pysecrets
 import time
 from urllib.parse import quote
 
@@ -56,7 +57,7 @@ ASSUMPTIONS = {
 }
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def generate_simulated_data(days=30, seed=42):
     """Membuat tabel data harian simulasi untuk prototype SOMAT."""
     # "seed" membuat angka acak selalu sama setiap dijalankan,
@@ -289,6 +290,7 @@ def generate_recommendation(
 try:
     import psycopg2
     import psycopg2.extras
+    import psycopg2.pool
 except Exception:  # paket belum terpasang
     psycopg2 = None
 
@@ -359,6 +361,12 @@ SCHEMA_SQL = [
         can_access BOOLEAN NOT NULL DEFAULT TRUE,
         PRIMARY KEY (role_key, page_key)
     )""",
+    """CREATE TABLE IF NOT EXISTS sessions (
+        token_hash TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL
+    )""",
 ]
 
 
@@ -366,24 +374,46 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-@contextmanager
-def _conn():
-    con = psycopg2.connect(DB_URL, connect_timeout=10)
-    try:
-        yield con
-        con.commit()
-    except Exception:
-        con.rollback()
-        raise
-    finally:
-        con.close()
+@st.cache_resource(show_spinner=False)
+def _pool(url):
+    """Pool koneksi yang dipakai ulang antar-rerun. Membuka koneksi baru ke Neon
+    (TCP + TLS + login) memakan waktu ~0,3-1 detik; dengan pool, query berikutnya
+    hanya satu kali bolak-balik jaringan."""
+    return psycopg2.pool.ThreadedConnectionPool(
+        1, 5, dsn=url, connect_timeout=10,
+        keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
+    )
 
 
 def db_query(sql, params=()):
-    """Jalankan satu query berparameter (aman dari SQL injection). SELECT -> list of dict."""
-    with _conn() as con, con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params)
-        return [dict(r) for r in cur.fetchall()] if cur.description else []
+    """Jalankan satu query berparameter (aman dari SQL injection). SELECT -> list of dict.
+
+    Koneksi diambil dari pool. Jika koneksi basi (Neon menidurkan komputasi setelah
+    5 menit tidak aktif), koneksi dibuang dan query diulang sekali dengan koneksi baru.
+    """
+    for attempt in (1, 2):
+        pool = _pool(DB_URL)
+        con = pool.getconn()
+        try:
+            with con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(sql, params)
+                rows = [dict(r) for r in cur.fetchall()] if cur.description else []
+            con.commit()
+            pool.putconn(con)
+            return rows
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            try:
+                pool.putconn(con, close=True)
+            except Exception:
+                pass
+            if attempt == 2:
+                raise
+        except Exception:
+            try:
+                con.rollback()
+            finally:
+                pool.putconn(con)
+            raise
 
 
 # ---------- kata sandi ----------
@@ -683,10 +713,20 @@ def authenticate(username, password):
         return None, "db"
 
 
-def refresh_user():
-    """Cek ulang status, role, nama, dan foto pengguna dari database."""
+USER_CHECK_TTL = 30  # detik; perubahan peran/status oleh admin berlaku maksimal setelah ini
+
+
+def refresh_user(force=False):
+    """Cek ulang status, role, nama, dan foto pengguna dari database.
+
+    Hanya menyentuh database setiap USER_CHECK_TTL detik (kecuali force=True),
+    supaya pindah tab tidak menunggu query ke database.
+    """
     u = current_user()
     if not u or not DB_ACTIVE:
+        return u
+    now = time.time()
+    if not force and now - st.session_state.get("_user_checked", 0) < USER_CHECK_TTL:
         return u
     try:
         row = get_user(u["username"])
@@ -698,6 +738,7 @@ def refresh_user():
     u["role"] = row["role"]
     u["display_name"] = row["display_name"] or row["username"]
     u["avatar_data"] = row.get("avatar_data")
+    st.session_state["_user_checked"] = now
     return u
 
 
@@ -711,8 +752,88 @@ def can_decide():
     return bool(u) and DB_ACTIVE and can_access_page("operator", u)
 
 
+COOKIE_NAME = "somat_session"
+SESSION_DAYS = 7
+
+
+def _token_hash(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()   # hanya hash yang disimpan di database
+
+
+def create_session_token(username):
+    """Buat token sesi acak untuk cookie browser. Database hanya menyimpan hash-nya."""
+    token = pysecrets.token_urlsafe(32)
+    now = _now()
+    db_query("DELETE FROM sessions WHERE expires_at < %s", (now,))
+    db_query(
+        "INSERT INTO sessions (token_hash, username, created_at, expires_at) VALUES (%s,%s,%s,%s)",
+        (_token_hash(token), username, now, now + timedelta(days=SESSION_DAYS)),
+    )
+    return token
+
+
+def session_user(token):
+    """Pengguna aktif pemilik token yang belum kedaluwarsa, atau None."""
+    rows = db_query(
+        "SELECT u.username, u.display_name, u.role, u.avatar_data FROM sessions s "
+        "JOIN users u ON u.username = s.username "
+        "WHERE s.token_hash=%s AND s.expires_at > %s AND u.active",
+        (_token_hash(token), _now()),
+    )
+    if not rows:
+        return None
+    r = rows[0]
+    return {"username": r["username"], "display_name": r["display_name"] or r["username"],
+            "role": r["role"], "avatar_data": r.get("avatar_data")}
+
+
+def revoke_sessions(username, keep_token=None):
+    if keep_token:
+        db_query("DELETE FROM sessions WHERE username=%s AND token_hash<>%s", (username, _token_hash(keep_token)))
+    else:
+        db_query("DELETE FROM sessions WHERE username=%s", (username,))
+
+
+def start_session(user):
+    """Dipanggil setelah login berhasil: simpan pengguna di sesi + minta browser menyimpan cookie."""
+    st.session_state["user"] = user
+    st.session_state["page"] = "overview"
+    st.session_state["_user_checked"] = time.time()
+    try:
+        token = create_session_token(user["username"])
+        st.session_state["_session_token"] = token
+        st.session_state["_cookie_action"] = ("set", token)
+    except Exception:
+        pass   # login tetap berhasil; hanya tidak "diingat" setelah refresh
+
+
+def flush_cookie_action():
+    """Menulis/menghapus cookie lewat JavaScript kecil (tanpa tampilan)."""
+    act = st.session_state.pop("_cookie_action", None)
+    if not act:
+        return
+    value, max_age = (act[1], SESSION_DAYS * 86400) if act[0] == "set" else ("", 0)
+    components.html(
+        f"""<script>
+        try {{
+          const p = window.parent;
+          const sec = p.location.protocol === 'https:' ? '; Secure' : '';
+          p.document.cookie = '{COOKIE_NAME}={value}; path=/; max-age={max_age}; SameSite=Lax' + sec;
+        }} catch (e) {{}}
+        </script>""",
+        height=0,
+    )
+
+
 def logout():
+    token = st.session_state.pop("_session_token", None)
     audit("logout")
+    if token and DB_ACTIVE:
+        try:
+            db_query("DELETE FROM sessions WHERE token_hash=%s", (_token_hash(token),))
+        except Exception:
+            pass
+    st.session_state["_cookie_action"] = ("clear",)
     st.session_state["user"] = None
     st.session_state["page"] = "login"
     st.session_state.pop("pending_recommendation", None)
@@ -839,6 +960,8 @@ def update_user(username, role=None, active=None):
         if losing_admin and _active_admin_count() <= 1:
             return "last_admin"
         db_query("UPDATE users SET role=%s, active=%s WHERE username=%s", (new_role, new_active, username))
+        if not new_active:
+            revoke_sessions(username)
         audit("user_update", f"{username}: role={new_role}, active={new_active}")
         return None
     except Exception:
@@ -854,6 +977,7 @@ def reset_password(username, new_password):
     try:
         db_query("UPDATE users SET password_hash=%s, failed_count=0, locked_until=0 WHERE username=%s",
                  (hash_password(new_password), username))
+        revoke_sessions(username)
         audit("password_reset", username)
         return None
     except Exception:
@@ -874,6 +998,7 @@ def change_own_password(current, new, confirm):
             audit("password_change_fail", "sandi saat ini salah")
             return "wrong_current"
         db_query("UPDATE users SET password_hash=%s WHERE username=%s", (hash_password(new), u["username"]))
+        revoke_sessions(u["username"], keep_token=st.session_state.get("_session_token"))
         audit("password_change")
         return None
     except Exception:
@@ -926,8 +1051,7 @@ def render_login_form(key="login_form"):
     if go:
         user, err = authenticate(uname, pwd)
         if user:
-            st.session_state["user"] = user
-            st.session_state["page"] = "overview"
+            start_session(user)
             st.rerun()
         else:
             st.error(auth_msg(err))
@@ -1159,7 +1283,7 @@ SENSORS = [
 ]
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def generate_sensor_readings(hours=168, seed=7):
     """
     PROTOTYPE: membangkitkan pembacaan sensor SIMULASI per jam.
@@ -1298,6 +1422,32 @@ if "sb_collapsed" not in st.session_state:
     st.session_state["sb_collapsed"] = False
 if "user" not in st.session_state:
     st.session_state["user"] = None
+
+# ---- Pulihkan sesi setelah refresh browser ----
+# 1) Preferensi tampilan dari URL (?page=...&theme=...&sb=...&lang=...) sekali per sesi browser.
+# 2) Pengguna dari cookie sesi (token acak; di database hanya hash-nya tersimpan).
+_PAGES_OK = APP_PAGE_KEYS + ("account", "admin")
+if not st.session_state.get("_prefs_loaded"):
+    st.session_state["_prefs_loaded"] = True
+    _qp = st.query_params
+    if _qp.get("theme") in ("light", "dark"):
+        st.session_state["light_mode"] = _qp.get("theme") == "light"
+    if _qp.get("sb") in ("0", "1"):
+        st.session_state["sb_collapsed"] = _qp.get("sb") == "1"
+    if _qp.get("page") in _PAGES_OK:
+        st.session_state["_want_page"] = _qp.get("page")
+if st.session_state.get("user") is None and DB_ACTIVE and not st.session_state.get("_restore_tried"):
+    st.session_state["_restore_tried"] = True
+    try:
+        _tok = st.context.cookies.get(COOKIE_NAME)
+        _restored = session_user(_tok) if _tok else None
+        if _restored:
+            st.session_state["user"] = _restored
+            st.session_state["_session_token"] = _tok
+            st.session_state["_user_checked"] = time.time()
+            st.session_state["page"] = st.session_state.pop("_want_page", "overview")
+    except Exception:
+        pass
 # Status sidebar (False = lebar penuh, True = mini-sidebar ikon saja). Dipakai CSS & menu.
 COLLAPSED = bool(st.session_state["sb_collapsed"])
 
@@ -1351,8 +1501,10 @@ def _chevron_icon(direction):
     return quote(svg, safe="")
 
 
+@st.cache_resource(show_spinner=False)
 def _logo_b64():
-    """Cari logo di beberapa lokasi umum. Kosong jika tidak ditemukan."""
+    """Logo diperkecil (maks. 160 px) lalu di-cache. Sebelumnya file asli ~118 KB di-embed
+    beberapa kali pada setiap rerun, memperlambat perpindahan tab."""
     for cand in (
         LOGO_PATH,
         Path.cwd() / "assets" / "somat_logo.png",
@@ -1361,7 +1513,17 @@ def _logo_b64():
     ):
         try:
             if cand.exists():
-                return base64.b64encode(cand.read_bytes()).decode("ascii")
+                data = cand.read_bytes()
+                try:
+                    with Image.open(io.BytesIO(data)) as im:
+                        im = im.convert("RGBA")
+                        im.thumbnail((160, 160))
+                        buf = io.BytesIO()
+                        im.save(buf, "PNG", optimize=True)
+                        data = buf.getvalue()
+                except Exception:
+                    pass
+                return base64.b64encode(data).decode("ascii")
         except OSError:
             pass
     return ""
@@ -1385,6 +1547,7 @@ logo_b64 = _logo_b64()
 LOGO_SRC = f"data:image/png;base64,{logo_b64}" if logo_b64 else LOGO_FALLBACK
 
 
+@st.cache_resource(show_spinner=False)
 def _irrigation_image_b64():
     for candidate in (IRRIGATION_LOGIN_PATH, BASE_DIR / "irrigation_login.jpg", Path.cwd() / "assets" / "irrigation_login.jpg"):
         try:
@@ -2441,6 +2604,23 @@ st.button(
 )
 
 
+flush_cookie_action()   # tulis/hapus cookie sesi bila diminta (login/logout)
+
+
+def _sync_url(with_page):
+    """Simpan halaman, tema, sidebar & bahasa di URL supaya refresh kembali ke keadaan terakhir."""
+    want = {
+        "theme": "light" if st.session_state.get("light_mode") else "dark",
+        "sb": "1" if COLLAPSED else "0",
+        "lang": LANG,
+    }
+    if with_page:
+        want["page"] = st.session_state["page"]
+    for _k, _v in want.items():
+        if st.query_params.get(_k) != _v:
+            st.query_params[_k] = _v
+
+
 def render_login_screen():
     'Login menjadi layar pertama; sidebar dan konten dashboard belum dirender.'
     st.markdown('<div class="login-page-spacer"></div>', unsafe_allow_html=True)
@@ -2484,6 +2664,7 @@ else:
 
 if not current_user():
     st.session_state["page"] = "login"
+    _sync_url(False)
     render_login_screen()
     st.stop()
 
@@ -2499,10 +2680,14 @@ if _pg == "login":
     st.session_state["page"] = "overview"
 elif _pg == "account":
     pass
-elif _pg == "admin" and not is_admin():
-    st.session_state["page"] = _first_accessible_page(_u_gate)
+elif _pg == "admin":
+    # Halaman admin bukan bagian APP_PAGE_KEYS, jadi dicek terpisah (sebelumnya jatuh ke cabang
+    # berikutnya dan selalu dialihkan ke overview).
+    if not is_admin():
+        st.session_state["page"] = _first_accessible_page(_u_gate)
 elif _pg not in APP_PAGE_KEYS or not can_access_page(_pg, _u_gate):
     st.session_state["page"] = _first_accessible_page(_u_gate)
+_sync_url(True)
 
 # One compact custom sidebar toggle is shown only after login.
 st.button(
@@ -2918,7 +3103,7 @@ elif page == "operator":
 
     def _record(decision, mm, hours, note_text, flash):
         """Cek ulang izin (peran bisa berubah saat sesi) lalu catat keputusan."""
-        refresh_user()
+        refresh_user(force=True)
         if not can_decide():
             st.error(auth_msg("forbidden"))
             return
@@ -3082,7 +3267,7 @@ elif page == "account":
 # ADMIN (Administrasi)
 # ============================================================
 elif page == "admin":
-    refresh_user()
+    refresh_user(force=True)
     st.header(L("🛡️ Administration", "🛡️ Administrasi"))
     if not is_admin():
         st.error(auth_msg("forbidden"))
@@ -3250,4 +3435,3 @@ elif page == "admin":
                 } for r in _aud]), key="admin_audit", hide_index=True)
             else:
                 st.info(L("No events yet.", "Belum ada kejadian."))
-
