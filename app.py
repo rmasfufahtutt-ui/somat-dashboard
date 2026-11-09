@@ -676,6 +676,7 @@ def render_login_form(key="login_form"):
         user, err = authenticate(uname, pwd)
         if user:
             st.session_state["user"] = user
+            st.session_state["page"] = "overview"
             st.rerun()
         else:
             st.error(auth_msg(err))
@@ -2145,6 +2146,31 @@ st.button(
     on_click=_toggle_lang,
 )
 
+# Halaman pertama wajib login. Jangan render sidebar maupun dashboard
+# sebelum identitas pengguna berhasil diverifikasi melalui Neon.
+if not DB_ACTIVE:
+    st.session_state["user"] = None
+else:
+    refresh_user()
+
+if not current_user():
+    # Gaya dashboard tetap dipakai, tetapi sidebar khusus dashboard
+    # disembunyikan selama pengguna berada di halaman masuk.
+    st.markdown(
+        """<style>
+        [data-testid="stSidebar"],
+        [data-testid="stSidebarCollapsedControl"],
+        [data-testid="stExpandSidebarButton"],
+        [data-testid="stSidebarCollapseButton"] {display: none !important;}
+        </style>""",
+        unsafe_allow_html=True,
+    )
+    st.header(L("🔐 Sign in", "🔐 Masuk"))
+    st.caption(L("Only registered users can record decisions. Accounts are created by an administrator.",
+                 "Hanya pengguna terdaftar yang dapat mencatat keputusan. Akun dibuat oleh administrator."))
+    render_login_form("login_page_form")
+    st.stop()
+
 # FIX 1: satu-satunya tombol buka/tutup sidebar di desktop (selalu terlihat).
 st.button(
     "Toggle sidebar",
@@ -2153,9 +2179,9 @@ st.button(
     on_click=_toggle_sidebar,
 )
 
-# Penjaga halaman: login hanya untuk yang belum masuk, akun untuk yang sudah masuk, admin untuk admin.
+# Penjaga halaman: akun hanya untuk pengguna masuk, administrasi hanya untuk admin.
 _pg = st.session_state["page"]
-if (_pg == "login" and (st.session_state.get("user") or DEMO_MODE)) \
+if (_pg == "login") \
         or (_pg == "account" and not st.session_state.get("user")) \
         or (_pg == "admin" and not is_admin()):
     st.session_state["page"] = "overview"
@@ -2173,8 +2199,6 @@ if st.session_state.get("user"):
     nav_items.append(("account", "👤", L("My Account", "Akun Saya")))
     if is_admin():
         nav_items.append(("admin", "🛡️", L("Admin", "Administrasi")))
-elif not DEMO_MODE:
-    nav_items.append(("login", "🔐", L("Sign in", "Masuk")))
 
 with st.sidebar:
     if COLLAPSED:
@@ -2621,7 +2645,6 @@ elif page == "operator":
     elif not _u:
         if DB_ACTIVE:
             st.info(L("Please sign in as an operator to record decisions.", "Silakan masuk sebagai operator untuk mencatat keputusan."))
-            render_login_form("op_login_form")
     elif DB_ACTIVE:
         st.warning(L("Your role is read-only (viewer). Only operators and administrators can record decisions.",
                      "Peran Anda hanya-lihat. Hanya operator dan administrator yang dapat mencatat keputusan."))
@@ -2658,16 +2681,6 @@ elif page == "operator":
             render_interactive_table(_hist, key="decision_history", hide_index=True)
         else:
             st.info(L("No operator decisions recorded yet.", "Belum ada keputusan operator yang tercatat."))
-
-
-# ============================================================
-# SIGN IN (Masuk)
-# ============================================================
-elif page == "login":
-    st.header(L("🔐 Sign in", "🔐 Masuk"))
-    st.caption(L("Only registered users can record decisions. Accounts are created by an administrator.",
-                 "Hanya pengguna terdaftar yang dapat mencatat keputusan. Akun dibuat oleh administrator."))
-    render_login_form("login_page_form")
 
 
 # ============================================================
