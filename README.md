@@ -168,3 +168,24 @@ Prototipe untuk keperluan akademik dan demonstrasi. Tidak untuk dipakai sebagai 
 
 The dashboard opens in **English** by default. Use the **🌐 EN / ID** button at the top-right
 to switch between English and Bahasa Indonesia (`?lang=id` in the URL also works).
+
+## Database & Login (optional)
+
+Without any configuration the app runs in **demo mode** (no login, decisions kept for the session only).
+
+To enable permanent storage and login, add a free Postgres database (e.g. Neon) and put these in
+Streamlit **Secrets** (or `.streamlit/secrets.toml` locally — never commit that file):
+
+```toml
+[neon]
+url = "postgresql://USER:PASSWORD@HOST/DBNAME?sslmode=require"
+
+[bootstrap_admin]          # used once, only while the users table is empty
+username = "admin"
+password = "choose-a-strong-password"
+```
+
+- Roles: **admin** (manage users, audit log), **operator** (record decisions), **viewer** (read-only).
+- Passwords are stored as salted PBKDF2-SHA256 hashes; 5 wrong attempts lock an account for 5 minutes.
+- Every decision is saved with its context (soil moisture, rainfall, ET0, ...) as a baseline for learning,
+  and sign-ins/decisions/user changes are written to an audit log.

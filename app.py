@@ -3,12 +3,17 @@
 # PROTOTYPE: seluruh data di bawah adalah DATA SIMULASI,
 # bukan data penelitian aktual.
 # ============================================================
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 import base64
+import hashlib
+import hmac
 import html
 import json
+import os
 import re
+import time
 from urllib.parse import quote
 
 import numpy as np
@@ -271,12 +276,420 @@ def generate_recommendation(
     }
 
 
-# ---------------- Decision log (disimpan selama session) ----------------
-def log_decision(decision, recommendation, irrigation_mm, duration_hours, note):
-    """Menambahkan satu catatan keputusan operator ke Decision Log.
+# ============================================================
+# DATABASE (Neon Postgres) + LOGIN
+# - Tanpa konfigurasi database  -> mode DEMO (seperti sebelumnya: tanpa login,
+#   keputusan hanya disimpan selama sesi).
+# - Dengan [neon] url di st.secrets -> login wajib untuk membuat keputusan
+#   operator, dan semua keputusan disimpan permanen + dicatat di audit log.
+# Kata sandi TIDAK pernah disimpan polos: hanya hash PBKDF2-SHA256 + salt.
+# ============================================================
+try:
+    import psycopg2
+    import psycopg2.extras
+except Exception:  # paket belum terpasang
+    psycopg2 = None
 
-    Yang disimpan adalah kode/angka (bukan kalimat), supaya riwayat tampil
-    dalam bahasa yang sedang aktif walaupun bahasa diganti setelahnya.
+
+def _secret(section, key, default=""):
+    try:
+        return st.secrets[section][key]
+    except Exception:
+        return default
+
+
+DB_URL = str(_secret("neon", "url", "") or os.environ.get("DATABASE_URL", ""))
+DEMO_MODE = not DB_URL                 # database belum dikonfigurasi -> demo terbuka
+ROLES = ("admin", "operator", "viewer")
+MAX_FAILS, LOCK_SECONDS = 5, 300       # 5x salah sandi -> akun dikunci 5 menit
+PBKDF2_ITERS = 310_000
+
+SCHEMA_SQL = [
+    """CREATE TABLE IF NOT EXISTS users (
+        id BIGSERIAL PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        display_name TEXT NOT NULL DEFAULT '',
+        role TEXT NOT NULL DEFAULT 'viewer',
+        password_hash TEXT NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        failed_count INTEGER NOT NULL DEFAULT 0,
+        locked_until DOUBLE PRECISION NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS decisions (
+        id BIGSERIAL PRIMARY KEY,
+        ts TIMESTAMPTZ NOT NULL,
+        username TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        recommended_mm DOUBLE PRECISION,
+        operator_mm DOUBLE PRECISION,
+        duration_h DOUBLE PRECISION,
+        note TEXT NOT NULL DEFAULT '',
+        new_moisture DOUBLE PRECISION,
+        status TEXT,
+        learning_kind TEXT,
+        learning_diff DOUBLE PRECISION,
+        context JSONB,
+        source TEXT NOT NULL DEFAULT 'simulation'
+    )""",
+    """CREATE TABLE IF NOT EXISTS audit_log (
+        id BIGSERIAL PRIMARY KEY,
+        ts TIMESTAMPTZ NOT NULL,
+        username TEXT NOT NULL,
+        action TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT ''
+    )""",
+]
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+@contextmanager
+def _conn():
+    con = psycopg2.connect(DB_URL, connect_timeout=10)
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def db_query(sql, params=()):
+    """Jalankan satu query berparameter (aman dari SQL injection). SELECT -> list of dict."""
+    with _conn() as con, con.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, params)
+        return [dict(r) for r in cur.fetchall()] if cur.description else []
+
+
+# ---------- kata sandi ----------
+def hash_password(password):
+    salt = os.urandom(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERS)
+    return f"pbkdf2_sha256${PBKDF2_ITERS}${salt.hex()}${dk.hex()}"
+
+
+def verify_password(password, stored):
+    try:
+        algo, iters, salt_hex, hash_hex = stored.split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(iters))
+        return hmac.compare_digest(dk.hex(), hash_hex)
+    except Exception:
+        return False
+
+
+@st.cache_resource(show_spinner=False)
+def _dummy_hash():
+    return hash_password("dummy-password-for-timing")
+
+
+def valid_username(u):
+    return bool(re.fullmatch(r"[a-z0-9._-]{3,32}", u or ""))
+
+
+def valid_password(p):
+    return isinstance(p, str) and len(p) >= 8
+
+
+# ---------- inisialisasi (sekali per proses; kegagalan TIDAK di-cache) ----------
+@st.cache_resource(show_spinner=False)
+def _init_db(url):
+    for stmt in SCHEMA_SQL:
+        db_query(stmt)
+    if not db_query("SELECT 1 FROM users LIMIT 1"):
+        bu = str(_secret("bootstrap_admin", "username", "")).strip().lower()
+        bp = str(_secret("bootstrap_admin", "password", ""))
+        if valid_username(bu) and valid_password(bp):
+            db_query(
+                "INSERT INTO users (username, display_name, role, password_hash, created_at) "
+                "VALUES (%s,%s,'admin',%s,%s)",
+                (bu, bu, hash_password(bp), _now()),
+            )
+            db_query(
+                "INSERT INTO audit_log (ts, username, action, detail) VALUES (%s,%s,%s,%s)",
+                (_now(), "system", "bootstrap_admin", f"admin '{bu}' dibuat dari secrets"),
+            )
+    return True
+
+
+DB_OK = False
+if psycopg2 is not None and DB_URL:
+    try:
+        DB_OK = bool(_init_db(DB_URL))
+    except Exception:
+        DB_OK = False
+DB_ACTIVE = bool(DB_URL) and DB_OK
+
+
+# ---------- audit ----------
+def current_user():
+    return st.session_state.get("user")
+
+
+def audit(action, detail="", username=None):
+    if not DB_ACTIVE:
+        return
+    try:
+        who = username or (current_user() or {}).get("username", "-")
+        db_query(
+            "INSERT INTO audit_log (ts, username, action, detail) VALUES (%s,%s,%s,%s)",
+            (_now(), who, action, str(detail)[:500]),
+        )
+    except Exception:
+        pass
+
+
+# ---------- pengguna ----------
+def get_user(username):
+    rows = db_query("SELECT * FROM users WHERE username=%s", ((username or "").strip().lower(),))
+    return rows[0] if rows else None
+
+
+def authenticate(username, password):
+    """Kembalikan (user | None, kode_error). Kode: 'invalid', 'locked', 'db'."""
+    try:
+        u = (username or "").strip().lower()
+        row = get_user(u)
+        if row is None:
+            verify_password(password or "", _dummy_hash())   # samakan waktu respons
+            audit("login_fail", "username tidak dikenal", username=u or "-")
+            return None, "invalid"
+        if time.time() < float(row["locked_until"]):
+            audit("login_blocked", "akun terkunci sementara", username=u)
+            return None, "locked"
+        if row["active"] and verify_password(password or "", row["password_hash"]):
+            db_query("UPDATE users SET failed_count=0, locked_until=0 WHERE username=%s", (u,))
+            audit("login_ok", "", username=u)
+            return {"username": row["username"], "display_name": row["display_name"] or row["username"],
+                    "role": row["role"]}, None
+        fails = int(row["failed_count"]) + 1
+        locked = time.time() + LOCK_SECONDS if fails >= MAX_FAILS else 0
+        db_query("UPDATE users SET failed_count=%s, locked_until=%s WHERE username=%s",
+                 (0 if locked else fails, locked, u))
+        audit("login_fail", "sandi salah" if row["active"] else "akun nonaktif", username=u)
+        return None, "locked" if locked else "invalid"
+    except Exception:
+        return None, "db"
+
+
+def refresh_user():
+    """Cek ulang peran/status pengguna di database (mis. dinonaktifkan admin saat sesi berjalan)."""
+    u = current_user()
+    if not u or not DB_ACTIVE:
+        return u
+    try:
+        row = get_user(u["username"])
+    except Exception:
+        return u
+    if not row or not row["active"]:
+        st.session_state["user"] = None
+        return None
+    u["role"], u["display_name"] = row["role"], row["display_name"] or row["username"]
+    return u
+
+
+def can_decide():
+    if DEMO_MODE:
+        return True
+    u = current_user()
+    return bool(u) and DB_ACTIVE and u["role"] in ("admin", "operator")
+
+
+def is_admin():
+    u = current_user()
+    return bool(u) and DB_ACTIVE and u["role"] == "admin"
+
+
+def logout():
+    audit("logout")
+    st.session_state["user"] = None
+    st.session_state["page"] = "overview"
+
+
+def role_label(role):
+    return {
+        "admin": L("Administrator", "Administrator"),
+        "operator": L("Operator", "Operator"),
+        "viewer": L("Viewer (read-only)", "Pengamat (hanya lihat)"),
+    }.get(role, role)
+
+
+def auth_msg(code):
+    return {
+        "invalid": L("Wrong username or password.", "Nama pengguna atau kata sandi salah."),
+        "locked": L(f"Too many failed attempts. Try again in {LOCK_SECONDS // 60} minutes.",
+                    f"Terlalu banyak percobaan gagal. Coba lagi dalam {LOCK_SECONDS // 60} menit."),
+        "db": L("The database is unreachable. Please try again shortly.",
+                "Database tidak dapat dihubungi. Coba lagi sebentar lagi."),
+        "bad_username": L("Username: 3-32 characters, lowercase letters, digits, . _ -",
+                          "Nama pengguna: 3-32 karakter, huruf kecil, angka, . _ -"),
+        "bad_password": L("Password must be at least 8 characters.", "Kata sandi minimal 8 karakter."),
+        "exists": L("That username already exists.", "Nama pengguna itu sudah ada."),
+        "bad_role": L("Invalid role.", "Peran tidak valid."),
+        "last_admin": L("You cannot remove the last active administrator.",
+                        "Administrator aktif terakhir tidak boleh dihapus/dinonaktifkan."),
+        "self": L("You cannot change your own role or deactivate yourself here.",
+                  "Anda tidak dapat mengubah peran atau menonaktifkan diri sendiri di sini."),
+        "mismatch": L("The new passwords do not match.", "Kata sandi baru tidak sama."),
+        "wrong_current": L("Current password is incorrect.", "Kata sandi saat ini salah."),
+        "forbidden": L("You do not have permission for this action.", "Anda tidak punya izin untuk aksi ini."),
+    }.get(code, code)
+
+
+def create_user(username, display_name, role, password):
+    """Hanya admin. Kembalikan None jika berhasil, selain itu kode error."""
+    if not is_admin():
+        return "forbidden"
+    username = (username or "").strip().lower()
+    if not valid_username(username):
+        return "bad_username"
+    if not valid_password(password):
+        return "bad_password"
+    if role not in ROLES:
+        return "bad_role"
+    try:
+        if get_user(username):
+            return "exists"
+        db_query(
+            "INSERT INTO users (username, display_name, role, password_hash, created_at) VALUES (%s,%s,%s,%s,%s)",
+            (username, (display_name or username).strip()[:60], role, hash_password(password), _now()),
+        )
+        audit("user_create", f"{username} ({role})")
+        return None
+    except Exception:
+        return "db"
+
+
+def _active_admin_count():
+    return int(db_query("SELECT COUNT(*) AS n FROM users WHERE role='admin' AND active")[0]["n"])
+
+
+def update_user(username, role=None, active=None):
+    """Hanya admin. Tidak boleh mengubah diri sendiri / menghapus admin aktif terakhir."""
+    if not is_admin():
+        return "forbidden"
+    try:
+        target = get_user(username)
+        if not target:
+            return "invalid"
+        if username == current_user()["username"]:
+            return "self"
+        if role is not None and role not in ROLES:
+            return "bad_role"
+        new_role = role if role is not None else target["role"]
+        new_active = active if active is not None else bool(target["active"])
+        losing_admin = target["role"] == "admin" and target["active"] and (new_role != "admin" or not new_active)
+        if losing_admin and _active_admin_count() <= 1:
+            return "last_admin"
+        db_query("UPDATE users SET role=%s, active=%s WHERE username=%s", (new_role, new_active, username))
+        audit("user_update", f"{username}: role={new_role}, active={new_active}")
+        return None
+    except Exception:
+        return "db"
+
+
+def reset_password(username, new_password):
+    """Hanya admin. Juga membuka kunci akun."""
+    if not is_admin():
+        return "forbidden"
+    if not valid_password(new_password):
+        return "bad_password"
+    try:
+        db_query("UPDATE users SET password_hash=%s, failed_count=0, locked_until=0 WHERE username=%s",
+                 (hash_password(new_password), username))
+        audit("password_reset", username)
+        return None
+    except Exception:
+        return "db"
+
+
+def change_own_password(current, new, confirm):
+    u = current_user()
+    if not u or not DB_ACTIVE:
+        return "forbidden"
+    if new != confirm:
+        return "mismatch"
+    if not valid_password(new):
+        return "bad_password"
+    try:
+        row = get_user(u["username"])
+        if not row or not verify_password(current or "", row["password_hash"]):
+            audit("password_change_fail", "sandi saat ini salah")
+            return "wrong_current"
+        db_query("UPDATE users SET password_hash=%s WHERE username=%s", (hash_password(new), u["username"]))
+        audit("password_change")
+        return None
+    except Exception:
+        return "db"
+
+
+def list_users():
+    return db_query("SELECT username, display_name, role, active, created_at FROM users ORDER BY username")
+
+
+# ---------- keputusan operator (permanen) ----------
+def save_decision_db(user, decision, rec_mm, op_mm, dur_h, note, feedback, context):
+    db_query(
+        "INSERT INTO decisions (ts, username, decision, recommended_mm, operator_mm, duration_h, note, "
+        "new_moisture, status, learning_kind, learning_diff, context, source) "
+        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+        (_now(), user, decision, float(rec_mm), float(op_mm), float(dur_h), str(note or "")[:1000],
+         float(feedback["new_moisture"]), feedback["status"], feedback["learning"]["kind"],
+         float(feedback["learning"].get("diff", 0.0)), json.dumps(context), "simulation"),
+    )
+
+
+def load_decisions_db(limit=200):
+    return db_query(
+        "SELECT ts, username, decision, recommended_mm, operator_mm, duration_h, note, new_moisture, status "
+        "FROM decisions ORDER BY ts DESC LIMIT %s", (int(limit),))
+
+
+def fetch_audit(limit=200):
+    return db_query("SELECT ts, username, action, detail FROM audit_log ORDER BY ts DESC LIMIT %s", (int(limit),))
+
+
+def fmt_ts(ts):
+    """Waktu UTC dari database -> WIB (Asia/Jakarta) sebagai teks."""
+    try:
+        return pd.to_datetime(ts, utc=True).tz_convert("Asia/Jakarta").strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(ts)
+
+
+def render_login_form(key="login_form"):
+    st.subheader(L("🔐 Sign in", "🔐 Masuk"))
+    if not DB_ACTIVE:
+        st.error(auth_msg("db"))
+        return
+    with st.form(key):
+        uname = st.text_input(L("Username", "Nama pengguna"))
+        pwd = st.text_input(L("Password", "Kata sandi"), type="password")
+        go = st.form_submit_button(L("Sign in", "Masuk"), type="primary")
+    if go:
+        user, err = authenticate(uname, pwd)
+        if user:
+            st.session_state["user"] = user
+            st.rerun()
+        else:
+            st.error(auth_msg(err))
+
+
+# ---------------- Decision log (database jika aktif, kalau tidak: selama sesi) ----------------
+def log_decision(decision, recommendation, irrigation_mm, duration_hours, note):
+    """Menambahkan satu catatan keputusan operator.
+
+    - Selalu disimpan di sesi (dipakai tampilan feedback dan sebagai cadangan).
+    - Jika database aktif: disimpan PERMANEN beserta konteks (kelembapan, hujan, ET0, dst.)
+      sebagai fondasi data pembelajaran, dan dicatat di audit log.
+    Yang disimpan adalah kode/angka (bukan kalimat), supaya riwayat tampil dalam
+    bahasa yang sedang aktif walaupun bahasa diganti setelahnya.
     """
     st.session_state.pop("pending_recommendation", None)
     feedback = simulate_field_response(
@@ -291,8 +704,10 @@ def log_decision(decision, recommendation, irrigation_mm, duration_hours, note):
         "operator_mm": irrigation_mm,
         "feedback": feedback,
     }
+    who = (current_user() or {}).get("username", "demo")
     st.session_state["decision_log"].append({
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "time": pd.Timestamp.now(tz="Asia/Jakarta").strftime("%Y-%m-%d %H:%M:%S"),
+        "operator": who,
         "decision": decision,
         "recommended_mm": recommendation["recommended_mm"],
         "operator_mm": irrigation_mm,
@@ -301,6 +716,23 @@ def log_decision(decision, recommendation, irrigation_mm, duration_hours, note):
         "new_moisture": feedback["new_moisture"],
         "status": feedback["status"],
     })
+    if DB_ACTIVE:
+        context = {
+            "soil_moisture": float(latest["soil_moisture"]),
+            "rainfall": float(latest["rainfall"]),
+            "et0": float(latest["et0"]),
+            "water_level": float(latest["water_level"]),
+            "available_discharge": float(latest["available_discharge"]),
+            "predicted_mm": float(prediction["irrigation_mm"]),
+            "feasible": bool(hydraulic["feasible"]),
+            "priority": recommendation.get("priority"),
+        }
+        try:
+            save_decision_db(who, decision, recommendation["recommended_mm"], irrigation_mm,
+                             duration_hours, note, feedback, context)
+            audit("decision", f"{decision}: {irrigation_mm} mm / {duration_hours} h")
+        except Exception:
+            st.session_state["db_error"] = True
 
 
 def field_status_text(code):
@@ -333,9 +765,13 @@ def feedback_learning_text(info):
 
 
 def decision_log_df():
-    """Riwayat keputusan sebagai tabel (judul kolom mengikuti bahasa aktif)."""
+    """Riwayat keputusan sebagai tabel (judul kolom mengikuti bahasa aktif).
+
+    Sumber: database (permanen) jika aktif; jika tidak/gagal: sesi ini saja.
+    """
     cols = {
-        "time": L("Time", "Waktu"),
+        "time": L("Time (WIB)", "Waktu (WIB)"),
+        "operator": L("Operator", "Operator"),
         "decision": L("Decision", "Keputusan"),
         "recommended_mm": L("SOMAT recommendation (mm)", "Rekomendasi SOMAT (mm)"),
         "operator_mm": L("Operator irrigation (mm)", "Irigasi operator (mm)"),
@@ -344,12 +780,21 @@ def decision_log_df():
         "new_moisture": L("Soil moisture after (simulated, %)", "Kelembapan tanah setelah (simulasi, %)"),
         "status": L("Field response (simulated)", "Respons lapangan (simulasi)"),
     }
+    source = None
+    if DB_ACTIVE:
+        try:
+            source = [
+                dict(r, time=fmt_ts(r["ts"]), operator=r["username"]) for r in load_decisions_db()
+            ]
+        except Exception:
+            st.session_state["db_error"] = True
+    if source is None:
+        source = [dict(r) for r in st.session_state["decision_log"][::-1]]
     rows = []
-    for r in st.session_state["decision_log"][::-1]:
-        row = dict(r)
-        row["status"] = field_status_text(row["status"])
-        rows.append({cols[k]: row[k] for k in cols})
-    return pd.DataFrame(rows)
+    for r in source:
+        r["status"] = field_status_text(r["status"]) if r.get("status") in ("below", "on", "above") else r.get("status")
+        rows.append({cols[k]: r.get(k) for k in cols})
+    return pd.DataFrame(rows, columns=list(cols.values()))
 
 
 # ---------------- Alerts / anomaly (PROTOTYPE) ----------------
@@ -597,6 +1042,8 @@ if "show_modify" not in st.session_state:
     st.session_state["show_modify"] = False
 if "sb_collapsed" not in st.session_state:
     st.session_state["sb_collapsed"] = False
+if "user" not in st.session_state:
+    st.session_state["user"] = None
 # Status sidebar (False = lebar penuh, True = mini-sidebar ikon saja). Dipakai CSS & menu.
 COLLAPSED = bool(st.session_state["sb_collapsed"])
 
@@ -1706,6 +2153,13 @@ st.button(
     on_click=_toggle_sidebar,
 )
 
+# Penjaga halaman: login hanya untuk yang belum masuk, akun untuk yang sudah masuk, admin untuk admin.
+_pg = st.session_state["page"]
+if (_pg == "login" and (st.session_state.get("user") or DEMO_MODE)) \
+        or (_pg == "account" and not st.session_state.get("user")) \
+        or (_pg == "admin" and not is_admin()):
+    st.session_state["page"] = "overview"
+
 # ---------------- Sidebar ----------------
 # ID halaman bersifat netral-bahasa; label menu mengikuti bahasa aktif.
 nav_items = [
@@ -1715,6 +2169,12 @@ nav_items = [
     ("alerts", "🚨", L("Alerts", "Peringatan")),
     ("operator", "👷", L("Operator Decision", "Keputusan Operator")),
 ]
+if st.session_state.get("user"):
+    nav_items.append(("account", "👤", L("My Account", "Akun Saya")))
+    if is_admin():
+        nav_items.append(("admin", "🛡️", L("Admin", "Administrasi")))
+elif not DEMO_MODE:
+    nav_items.append(("login", "🔐", L("Sign in", "Masuk")))
 
 with st.sidebar:
     if COLLAPSED:
@@ -1747,6 +2207,23 @@ with st.sidebar:
             width="stretch",
         ):
             st.session_state["page"] = page_id
+            st.rerun()
+
+    _u = current_user()
+    if _u:
+        if not COLLAPSED:
+            st.markdown(
+                f"""<div class="side-info-card"><div class="side-info-title">👤 <span>{html.escape(_u["display_name"])}</span></div>
+                <div class="side-info-muted">{html.escape(role_label(_u["role"]))}</div></div>""",
+                unsafe_allow_html=True,
+            )
+        if st.button(
+            "🚪" if COLLAPSED else "🚪  " + L("Sign out", "Keluar"),
+            key="nav_logout",
+            help=L("Sign out", "Keluar") if COLLAPSED else None,
+            width="stretch",
+        ):
+            logout()
             st.rerun()
 
     if not COLLAPSED:
@@ -2067,9 +2544,23 @@ elif page == "alerts":
 # OPERATOR DECISION (Keputusan Operator)
 # ============================================================
 elif page == "operator":
+    refresh_user()
     st.header(L("👷 Operator Decision (Human in the Loop)", "👷 Keputusan Operator (Human in the Loop)"))
     st.caption(L("SOMAT only gives suggestions. The operator makes the final decision. No irrigation gate is moved automatically. Simulated data.",
                  "SOMAT hanya memberi saran. Operator adalah pengambil keputusan akhir. Tidak ada pintu irigasi yang digerakkan otomatis. Data simulasi."))
+
+    _u = current_user()
+    if _u:
+        st.caption(L(f"Signed in as **{_u['display_name']}** ({role_label(_u['role'])})",
+                     f"Masuk sebagai **{_u['display_name']}** ({role_label(_u['role'])})"))
+    if DEMO_MODE:
+        st.info(L("Demo mode: the database is not configured, so no login is required and decisions are kept for this session only.",
+                  "Mode demo: database belum dikonfigurasi, jadi tidak perlu login dan keputusan hanya disimpan selama sesi ini."))
+    elif not DB_ACTIVE:
+        st.error(auth_msg("db") + " " + L("Decisions cannot be recorded right now.", "Keputusan tidak dapat dicatat saat ini."))
+    if st.session_state.pop("db_error", False):
+        st.warning(L("The database could not be reached; the latest data is shown for this session only.",
+                     "Database tidak dapat dihubungi; data terbaru hanya tampil untuk sesi ini."))
 
     # Pesan konfirmasi dari keputusan sebelumnya (ditampilkan setelah st.rerun)
     if "flash" in st.session_state:
@@ -2080,50 +2571,60 @@ elif page == "operator":
             "modify": L("✏️ Decision recorded: MODIFY", "✏️ Keputusan dicatat: MODIFY"),
         }.get(_flash, str(_flash)))
 
-    if "pending_recommendation" in st.session_state:
-        p = st.session_state["pending_recommendation"]
-        st.warning(L(
-            f"📨 Recommendation awaiting validation: {p['mm']} mm for {p['hours']} hours (sent {p['time']}). Choose APPROVE, MODIFY, or DELAY.",
-            f"📨 Rekomendasi menunggu validasi: {p['mm']} mm selama {p['hours']} jam (dikirim {p['time']}). Pilih APPROVE, MODIFY, atau DELAY.",
-        ))
-
-    note = st.text_input(
-        L("📝 Operator note (optional for APPROVE and DELAY)", "📝 Catatan operator (opsional untuk APPROVE dan DELAY)"),
-        placeholder=L("Example: discharge is sufficient, proceed as recommended", "Contoh: debit cukup, lanjutkan sesuai rekomendasi"),
-    )
-    b1, b2, b3 = st.columns(3)
-    approve = b1.button("APPROVE", type="primary", width="stretch")
-    modify = b2.button("MODIFY", width="stretch")
-    delay = b3.button("DELAY", width="stretch")
-
-    if approve:
+    def _record(decision, mm, hours, note_text, flash):
+        """Cek ulang izin (peran bisa berubah saat sesi) lalu catat keputusan."""
+        refresh_user()
+        if not can_decide():
+            st.error(auth_msg("forbidden"))
+            return
         st.session_state["show_modify"] = False
-        log_decision("APPROVE", recommendation, recommendation["recommended_mm"], recommendation["duration_hours"], note)
-        st.session_state["flash"] = "approve"
+        log_decision(decision, recommendation, mm, hours, note_text)
+        st.session_state["flash"] = flash
         st.rerun()
-    if delay:
-        st.session_state["show_modify"] = False
-        log_decision("DELAY", recommendation, 0.0, 0.0, note or L("Postponed by operator", "Ditunda oleh operator"))
-        st.session_state["flash"] = "delay"
-        st.rerun()
-    if modify:
-        st.session_state["show_modify"] = True
 
-    if st.session_state["show_modify"]:
-        with st.form("modify_form"):
-            st.subheader(L("✏️ Modify recommendation", "✏️ Ubah rekomendasi"))
-            mod_mm = st.number_input(L("Irrigation amount (mm)", "Jumlah air irigasi (mm)"), min_value=0.0, value=float(recommendation["recommended_mm"]), step=0.5)
-            mod_hours = st.number_input(L("Duration (hours)", "Durasi (jam)"), min_value=0.0, value=float(recommendation["duration_hours"]), step=0.5)
-            mod_reason = st.text_area(L("Reason for change (required)", "Alasan perubahan (wajib diisi)"))
-            submitted = st.form_submit_button(L("Save modified decision", "Simpan keputusan yang diubah"))
-        if submitted:
-            if mod_reason.strip() == "":
-                st.warning(L("A reason is required before saving a MODIFY decision.", "Alasan wajib diisi sebelum menyimpan keputusan MODIFY."))
-            else:
-                st.session_state["show_modify"] = False
-                log_decision("MODIFY", recommendation, mod_mm, mod_hours, mod_reason)
-                st.session_state["flash"] = "modify"
-                st.rerun()
+    if can_decide():
+        if "pending_recommendation" in st.session_state:
+            p = st.session_state["pending_recommendation"]
+            st.warning(L(
+                f"📨 Recommendation awaiting validation: {p['mm']} mm for {p['hours']} hours (sent {p['time']}). Choose APPROVE, MODIFY, or DELAY.",
+                f"📨 Rekomendasi menunggu validasi: {p['mm']} mm selama {p['hours']} jam (dikirim {p['time']}). Pilih APPROVE, MODIFY, atau DELAY.",
+            ))
+
+        note = st.text_input(
+            L("📝 Operator note (optional for APPROVE and DELAY)", "📝 Catatan operator (opsional untuk APPROVE dan DELAY)"),
+            placeholder=L("Example: discharge is sufficient, proceed as recommended", "Contoh: debit cukup, lanjutkan sesuai rekomendasi"),
+        )
+        b1, b2, b3 = st.columns(3)
+        approve = b1.button("APPROVE", type="primary", width="stretch")
+        modify = b2.button("MODIFY", width="stretch")
+        delay = b3.button("DELAY", width="stretch")
+
+        if approve:
+            _record("APPROVE", recommendation["recommended_mm"], recommendation["duration_hours"], note, "approve")
+        if delay:
+            _record("DELAY", 0.0, 0.0, note or L("Postponed by operator", "Ditunda oleh operator"), "delay")
+        if modify:
+            st.session_state["show_modify"] = True
+
+        if st.session_state["show_modify"]:
+            with st.form("modify_form"):
+                st.subheader(L("✏️ Modify recommendation", "✏️ Ubah rekomendasi"))
+                mod_mm = st.number_input(L("Irrigation amount (mm)", "Jumlah air irigasi (mm)"), min_value=0.0, value=float(recommendation["recommended_mm"]), step=0.5)
+                mod_hours = st.number_input(L("Duration (hours)", "Durasi (jam)"), min_value=0.0, value=float(recommendation["duration_hours"]), step=0.5)
+                mod_reason = st.text_area(L("Reason for change (required)", "Alasan perubahan (wajib diisi)"))
+                submitted = st.form_submit_button(L("Save modified decision", "Simpan keputusan yang diubah"))
+            if submitted:
+                if mod_reason.strip() == "":
+                    st.warning(L("A reason is required before saving a MODIFY decision.", "Alasan wajib diisi sebelum menyimpan keputusan MODIFY."))
+                else:
+                    _record("MODIFY", mod_mm, mod_hours, mod_reason, "modify")
+    elif not _u:
+        if DB_ACTIVE:
+            st.info(L("Please sign in as an operator to record decisions.", "Silakan masuk sebagai operator untuk mencatat keputusan."))
+            render_login_form("op_login_form")
+    elif DB_ACTIVE:
+        st.warning(L("Your role is read-only (viewer). Only operators and administrators can record decisions.",
+                     "Peran Anda hanya-lihat. Hanya operator dan administrator yang dapat mencatat keputusan."))
 
     st.header(L("🔄 Feedback Loop", "🔄 Umpan Balik (Feedback Loop)"))
     st.caption(L("Simulated field response (prototype). Not field measurements.", "Respons lapangan simulasi (prototype). Bukan hasil pengukuran lapangan."))
@@ -2147,8 +2648,131 @@ elif page == "operator":
         st.info(L("No decisions yet. Make an operator decision to see the feedback flow.",
                   "Belum ada keputusan. Buat keputusan operator untuk melihat alur feedback."))
 
-    st.subheader(L("📋 Decision History (this session only)", "📋 Riwayat Keputusan (sesi ini saja)"))
-    if st.session_state["decision_log"]:
-        render_interactive_table(decision_log_df(), key="decision_history", hide_index=True)
+    st.subheader(L("📋 Decision History (saved permanently)", "📋 Riwayat Keputusan (tersimpan permanen)")
+                 if DB_ACTIVE else L("📋 Decision History (this session only)", "📋 Riwayat Keputusan (sesi ini saja)"))
+    if not (DEMO_MODE or _u):
+        st.info(L("Sign in to view the decision history.", "Masuk untuk melihat riwayat keputusan."))
     else:
-        st.info(L("No operator decisions in this session yet.", "Belum ada keputusan operator pada session ini."))
+        _hist = decision_log_df()
+        if len(_hist):
+            render_interactive_table(_hist, key="decision_history", hide_index=True)
+        else:
+            st.info(L("No operator decisions recorded yet.", "Belum ada keputusan operator yang tercatat."))
+
+
+# ============================================================
+# SIGN IN (Masuk)
+# ============================================================
+elif page == "login":
+    st.header(L("🔐 Sign in", "🔐 Masuk"))
+    st.caption(L("Only registered users can record decisions. Accounts are created by an administrator.",
+                 "Hanya pengguna terdaftar yang dapat mencatat keputusan. Akun dibuat oleh administrator."))
+    render_login_form("login_page_form")
+
+
+# ============================================================
+# MY ACCOUNT (Akun Saya)
+# ============================================================
+elif page == "account":
+    _u = refresh_user()
+    st.header(L("👤 My Account", "👤 Akun Saya"))
+    if not _u:
+        st.info(L("Please sign in.", "Silakan masuk."))
+    else:
+        st.write(L(f"Username: **{_u['username']}**", f"Nama pengguna: **{_u['username']}**"))
+        st.write(L(f"Role: **{role_label(_u['role'])}**", f"Peran: **{role_label(_u['role'])}**"))
+        st.subheader(L("Change password", "Ganti kata sandi"))
+        with st.form("pw_form", clear_on_submit=True):
+            _cur = st.text_input(L("Current password", "Kata sandi saat ini"), type="password")
+            _new = st.text_input(L("New password (min. 8 characters)", "Kata sandi baru (min. 8 karakter)"), type="password")
+            _cnf = st.text_input(L("Repeat new password", "Ulangi kata sandi baru"), type="password")
+            _go = st.form_submit_button(L("Save new password", "Simpan kata sandi baru"))
+        if _go:
+            _err = change_own_password(_cur, _new, _cnf)
+            if _err:
+                st.error(auth_msg(_err))
+            else:
+                st.success(L("Password changed.", "Kata sandi diganti."))
+
+
+# ============================================================
+# ADMIN (Administrasi)
+# ============================================================
+elif page == "admin":
+    refresh_user()
+    st.header(L("🛡️ Administration", "🛡️ Administrasi"))
+    if not is_admin():
+        st.error(auth_msg("forbidden"))
+    else:
+        if "adm_flash" in st.session_state:
+            st.success(st.session_state.pop("adm_flash"))
+        tab_users, tab_audit = st.tabs([L("Users", "Pengguna"), L("Audit log", "Log audit")])
+
+        with tab_users:
+            _users = list_users()
+            render_interactive_table(pd.DataFrame([{
+                L("Username", "Nama pengguna"): r["username"],
+                L("Name", "Nama"): r["display_name"],
+                L("Role", "Peran"): role_label(r["role"]),
+                L("Active", "Aktif"): L("Yes", "Ya") if r["active"] else L("No", "Tidak"),
+                L("Created (WIB)", "Dibuat (WIB)"): fmt_ts(r["created_at"]),
+            } for r in _users]), key="admin_users", hide_index=True)
+
+            st.subheader(L("➕ Add user", "➕ Tambah pengguna"))
+            with st.form("add_user_form", clear_on_submit=True):
+                a1, a2 = st.columns(2)
+                nu = a1.text_input(L("Username", "Nama pengguna"))
+                nn = a2.text_input(L("Full name", "Nama lengkap"))
+                a3, a4 = st.columns(2)
+                nr = a3.selectbox(L("Role", "Peran"), ROLES, index=1, format_func=role_label)
+                npw = a4.text_input(L("Initial password (min. 8 characters)", "Kata sandi awal (min. 8 karakter)"), type="password")
+                add_go = st.form_submit_button(L("Create user", "Buat pengguna"), type="primary")
+            if add_go:
+                _err = create_user(nu, nn, nr, npw)
+                if _err:
+                    st.error(auth_msg(_err))
+                else:
+                    st.session_state["adm_flash"] = L(f"User '{nu.strip().lower()}' created.", f"Pengguna '{nu.strip().lower()}' dibuat.")
+                    st.rerun()
+
+            st.subheader(L("🛠️ Manage user", "🛠️ Kelola pengguna"))
+            _names = [r["username"] for r in _users]
+            _sel = st.selectbox(L("Select user", "Pilih pengguna"), _names, key="adm_sel")
+            _row = next(r for r in _users if r["username"] == _sel)
+            m1, m2 = st.columns(2)
+            with m1:
+                _role = st.selectbox(L("Role", "Peran"), ROLES, index=ROLES.index(_row["role"]),
+                                     format_func=role_label, key=f"adm_role_{_sel}")
+                _act = st.checkbox(L("Active", "Aktif"), value=bool(_row["active"]), key=f"adm_act_{_sel}")
+                if st.button(L("Save changes", "Simpan perubahan"), key="adm_save"):
+                    _err = update_user(_sel, _role, _act)
+                    if _err:
+                        st.error(auth_msg(_err))
+                    else:
+                        st.session_state["adm_flash"] = L("Changes saved.", "Perubahan disimpan.")
+                        st.rerun()
+            with m2:
+                with st.form("adm_reset_form", clear_on_submit=True):
+                    _rp = st.text_input(L("New password for this user", "Kata sandi baru untuk pengguna ini"), type="password")
+                    _rgo = st.form_submit_button(L("Reset password (also unlocks)", "Reset kata sandi (sekaligus membuka kunci)"))
+                if _rgo:
+                    _err = reset_password(_sel, _rp)
+                    if _err:
+                        st.error(auth_msg(_err))
+                    else:
+                        st.session_state["adm_flash"] = L(f"Password for '{_sel}' reset.", f"Kata sandi '{_sel}' direset.")
+                        st.rerun()
+
+        with tab_audit:
+            st.caption(L("Latest 200 events: sign-ins, decisions and user changes.",
+                         "200 kejadian terbaru: login, keputusan, dan perubahan pengguna."))
+            _aud = fetch_audit()
+            if _aud:
+                render_interactive_table(pd.DataFrame([{
+                    L("Time (WIB)", "Waktu (WIB)"): fmt_ts(r["ts"]),
+                    L("User", "Pengguna"): r["username"],
+                    L("Action", "Aksi"): r["action"],
+                    L("Detail", "Detail"): r["detail"],
+                } for r in _aud]), key="admin_audit", hide_index=True)
+            else:
+                st.info(L("No events yet.", "Belum ada kejadian."))
