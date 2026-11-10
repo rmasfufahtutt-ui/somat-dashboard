@@ -755,8 +755,8 @@ def can_decide():
     return bool(u) and DB_ACTIVE and can_access_page("operator", u)
 
 
-SESSION_DAYS = 7          # batas mutlak umur token
-IDLE_SECONDS = 30 * 60    # tidak aktif lebih dari 30 menit -> sesi berakhir
+SESSION_DAYS = 14
+IDLE_SECONDS = 14 * 24 * 60 * 60
 
 
 def _token_hash(token):
@@ -1053,9 +1053,16 @@ def save_decision_db(user, decision, rec_mm, op_mm, dur_h, note, feedback, conte
 
 
 def load_decisions_db(limit=200):
+    # Pastikan kolom audit tersedia sebelum membaca riwayat.
+    db_query("ALTER TABLE decisions ADD COLUMN IF NOT EXISTS edited_by TEXT")
+    db_query("ALTER TABLE decisions ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ")
+
     return db_query(
-        "SELECT id, ts, username, decision, recommended_mm, operator_mm, duration_h, note, new_moisture, status, edited_by "
-        "FROM decisions ORDER BY ts DESC LIMIT %s", (int(limit),))
+        "SELECT id, ts, username, decision, recommended_mm, operator_mm, "
+        "duration_h, note, new_moisture, status, edited_by "
+        "FROM decisions ORDER BY ts DESC LIMIT %s",
+        (int(limit),)
+    )
 
 
 DECISION_TYPES = ("APPROVE", "MODIFY", "DELAY")
