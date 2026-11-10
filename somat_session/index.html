@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0">
+<script>
+/* Komponen kecil SOMAT: menyimpan/membaca token sesi di localStorage browser.
+   Tidak menampilkan apa pun. Protokol komponen Streamlit (postMessage), tanpa build/npm. */
+(function () {
+  var KEY = "somat_session_token";
+  var lastNonce = null;
+  function send(type, payload) {
+    var msg = { isStreamlitMessage: true, type: type };
+    for (var k in payload) msg[k] = payload[k];
+    window.parent.postMessage(msg, "*");
+  }
+  window.addEventListener("message", function (e) {
+    if (!e.data || e.data.type !== "streamlit:render") return;
+    var a = e.data.args || {};
+    var nonce = String(a.nonce || "");
+    if (nonce === lastNonce) return;          // proses tiap nonce sekali saja (hindari loop rerun)
+    lastNonce = nonce;
+    var token = "";
+    try {
+      if (a.action === "set" && a.token) localStorage.setItem(KEY, a.token);
+      else if (a.action === "clear") localStorage.removeItem(KEY);
+      token = localStorage.getItem(KEY) || "";
+    } catch (err) { token = ""; }
+    send("streamlit:setComponentValue", { value: { token: token, nonce: nonce }, dataType: "json" });
+    send("streamlit:setFrameHeight", { height: 0 });
+  });
+  send("streamlit:componentReady", { apiVersion: 1 });
+  send("streamlit:setFrameHeight", { height: 0 });
+})();
+</script>
+</body>
+</html>

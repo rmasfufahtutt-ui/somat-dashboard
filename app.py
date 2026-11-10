@@ -367,6 +367,9 @@ SCHEMA_SQL = [
         created_at TIMESTAMPTZ NOT NULL,
         expires_at TIMESTAMPTZ NOT NULL
     )""",
+    "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ",
+    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS edited_by TEXT",
+    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ",
 ]
 
 
@@ -752,8 +755,8 @@ def can_decide():
     return bool(u) and DB_ACTIVE and can_access_page("operator", u)
 
 
-COOKIE_NAME = "somat_session"
-SESSION_DAYS = 7
+SESSION_DAYS = 7          # batas mutlak umur token
+IDLE_SECONDS = 30 * 60    # tidak aktif lebih dari 30 menit -> sesi berakhir
 
 
 def _token_hash(token):
@@ -761,30 +764,36 @@ def _token_hash(token):
 
 
 def create_session_token(username):
-    """Buat token sesi acak untuk cookie browser. Database hanya menyimpan hash-nya."""
+    """Buat token sesi acak (disimpan di localStorage browser). Database hanya menyimpan hash-nya."""
     token = pysecrets.token_urlsafe(32)
     now = _now()
     db_query("DELETE FROM sessions WHERE expires_at < %s", (now,))
     db_query(
-        "INSERT INTO sessions (token_hash, username, created_at, expires_at) VALUES (%s,%s,%s,%s)",
-        (_token_hash(token), username, now, now + timedelta(days=SESSION_DAYS)),
+        "INSERT INTO sessions (token_hash, username, created_at, expires_at, last_seen) VALUES (%s,%s,%s,%s,%s)",
+        (_token_hash(token), username, now, now + timedelta(days=SESSION_DAYS), now),
     )
     return token
 
 
 def session_user(token):
-    """Pengguna aktif pemilik token yang belum kedaluwarsa, atau None."""
+    """Pengguna aktif pemilik token yang belum kedaluwarsa DAN aktif dalam 30 menit terakhir, atau None."""
+    now = _now()
     rows = db_query(
         "SELECT u.username, u.display_name, u.role, u.avatar_data FROM sessions s "
         "JOIN users u ON u.username = s.username "
-        "WHERE s.token_hash=%s AND s.expires_at > %s AND u.active",
-        (_token_hash(token), _now()),
+        "WHERE s.token_hash=%s AND s.expires_at > %s AND s.last_seen > %s AND u.active",
+        (_token_hash(token), now, now - timedelta(seconds=IDLE_SECONDS)),
     )
     if not rows:
         return None
+    db_query("UPDATE sessions SET last_seen=%s WHERE token_hash=%s", (now, _token_hash(token)))
     r = rows[0]
     return {"username": r["username"], "display_name": r["display_name"] or r["username"],
             "role": r["role"], "avatar_data": r.get("avatar_data")}
+
+
+def touch_session(token):
+    db_query("UPDATE sessions SET last_seen=%s WHERE token_hash=%s", (_now(), _token_hash(token)))
 
 
 def revoke_sessions(username, keep_token=None):
@@ -794,35 +803,54 @@ def revoke_sessions(username, keep_token=None):
         db_query("DELETE FROM sessions WHERE username=%s", (username,))
 
 
+# Komponen kecil (folder somat_session/ di samping app.py) yang menyimpan token di localStorage browser.
+try:
+    _SESS_COMPONENT = components.declare_component(
+        "somat_session", path=str(Path(__file__).resolve().parent / "somat_session"))
+except Exception:
+    _SESS_COMPONENT = None
+
+
 def start_session(user):
-    """Dipanggil setelah login berhasil: simpan pengguna di sesi + minta browser menyimpan cookie."""
+    """Dipanggil setelah login berhasil: simpan pengguna di sesi + minta browser menyimpan token."""
+    now = time.time()
     st.session_state["user"] = user
     st.session_state["page"] = "overview"
-    st.session_state["_user_checked"] = time.time()
+    st.session_state["_user_checked"] = now
+    st.session_state["_last_activity"] = now
     try:
         token = create_session_token(user["username"])
         st.session_state["_session_token"] = token
-        st.session_state["_cookie_action"] = ("set", token)
+        st.session_state["_sess_args"] = {"action": "set", "token": token, "nonce": "set-" + token[:12]}
     except Exception:
         pass   # login tetap berhasil; hanya tidak "diingat" setelah refresh
 
 
-def flush_cookie_action():
-    """Menulis/menghapus cookie lewat JavaScript kecil (tanpa tampilan)."""
-    act = st.session_state.pop("_cookie_action", None)
-    if not act:
+def sync_browser_session():
+    """Pasang komponen penyimpan token; pulihkan sesi dari token jika masih berlaku."""
+    if _SESS_COMPONENT is None or not DB_ACTIVE:
         return
-    value, max_age = (act[1], SESSION_DAYS * 86400) if act[0] == "set" else ("", 0)
-    components.html(
-        f"""<script>
-        try {{
-          const p = window.parent;
-          const sec = p.location.protocol === 'https:' ? '; Secure' : '';
-          p.document.cookie = '{COOKIE_NAME}={value}; path=/; max-age={max_age}; SameSite=Lax' + sec;
-        }} catch (e) {{}}
-        </script>""",
-        height=0,
-    )
+    args = st.session_state.setdefault("_sess_args", {"action": "read", "token": "", "nonce": "read"})
+    res = _SESS_COMPONENT(**args, key="somat_sess", default=None)
+    if st.session_state.get("_restore_tried") or not isinstance(res, dict) or res.get("nonce") != "read":
+        return
+    st.session_state["_restore_tried"] = True
+    tok = res.get("token") or ""
+    if st.session_state.get("user") is not None or not tok:
+        return
+    try:
+        restored = session_user(tok)
+    except Exception:
+        restored = None
+    if restored:
+        now = time.time()
+        st.session_state["user"] = restored
+        st.session_state["_session_token"] = tok
+        st.session_state["_user_checked"] = now
+        st.session_state["_last_activity"] = now
+        st.session_state["page"] = st.session_state.pop("_want_page", "overview")
+    else:   # token basi (tidak aktif > 30 menit / dicabut): hapus dari browser
+        st.session_state["_sess_args"] = {"action": "clear", "token": "", "nonce": "clear-" + pysecrets.token_hex(4)}
 
 
 def logout():
@@ -833,11 +861,11 @@ def logout():
             db_query("DELETE FROM sessions WHERE token_hash=%s", (_token_hash(token),))
         except Exception:
             pass
-    st.session_state["_cookie_action"] = ("clear",)
+    st.session_state["_sess_args"] = {"action": "clear", "token": "", "nonce": "clear-" + pysecrets.token_hex(4)}
     st.session_state["user"] = None
     st.session_state["page"] = "login"
-    st.session_state.pop("pending_recommendation", None)
-    st.session_state.pop("show_modify", None)
+    for _k in ("pending_recommendation", "show_modify", "_last_activity", "_touched"):
+        st.session_state.pop(_k, None)
 
 
 def update_own_profile(display_name, avatar_data):
@@ -911,6 +939,9 @@ def auth_msg(code):
         "mismatch": L("The new passwords do not match.", "Kata sandi baru tidak sama."),
         "wrong_current": L("Current password is incorrect.", "Kata sandi saat ini salah."),
         "forbidden": L("You do not have permission for this action.", "Anda tidak punya izin untuk aksi ini."),
+        "bad_value": L("Invalid value. Check the decision type, amount (0-1000 mm) and duration (0-240 h).",
+                       "Nilai tidak valid. Periksa jenis keputusan, jumlah (0-1000 mm) dan durasi (0-240 jam)."),
+        "not_found": L("Record not found (it may already be deleted).", "Catatan tidak ditemukan (mungkin sudah dihapus)."),
     }.get(code, code)
 
 
@@ -1023,8 +1054,54 @@ def save_decision_db(user, decision, rec_mm, op_mm, dur_h, note, feedback, conte
 
 def load_decisions_db(limit=200):
     return db_query(
-        "SELECT ts, username, decision, recommended_mm, operator_mm, duration_h, note, new_moisture, status "
+        "SELECT id, ts, username, decision, recommended_mm, operator_mm, duration_h, note, new_moisture, status, edited_by "
         "FROM decisions ORDER BY ts DESC LIMIT %s", (int(limit),))
+
+
+DECISION_TYPES = ("APPROVE", "MODIFY", "DELAY")
+
+
+def update_decision(decision_id, decision, operator_mm, duration_h, note):
+    """Hanya admin. Mengubah isian keputusan operator; rekomendasi SOMAT & konteks tidak diubah."""
+    refresh_user(force=True)
+    if not is_admin():
+        return "forbidden"
+    try:
+        mm, hours = float(operator_mm), float(duration_h)
+    except (TypeError, ValueError):
+        return "bad_value"
+    if decision not in DECISION_TYPES or not (0 <= mm <= 1000) or not (0 <= hours <= 240):
+        return "bad_value"
+    try:
+        before = db_query("SELECT decision, operator_mm, duration_h, note FROM decisions WHERE id=%s", (int(decision_id),))
+        if not before:
+            return "not_found"
+        db_query(
+            "UPDATE decisions SET decision=%s, operator_mm=%s, duration_h=%s, note=%s, edited_by=%s, edited_at=%s WHERE id=%s",
+            (decision, mm, hours, str(note or "")[:1000], current_user()["username"], _now(), int(decision_id)),
+        )
+        b = before[0]
+        audit("decision_edit", f"#{decision_id}: {b['decision']}/{b['operator_mm']}mm/{b['duration_h']}h -> {decision}/{mm}mm/{hours}h")
+        return None
+    except Exception:
+        return "db"
+
+
+def delete_decision(decision_id):
+    """Hanya admin. Menghapus satu catatan keputusan (ringkasannya tetap tercatat di audit log)."""
+    refresh_user(force=True)
+    if not is_admin():
+        return "forbidden"
+    try:
+        before = db_query("SELECT username, decision, operator_mm FROM decisions WHERE id=%s", (int(decision_id),))
+        if not before:
+            return "not_found"
+        db_query("DELETE FROM decisions WHERE id=%s", (int(decision_id),))
+        b = before[0]
+        audit("decision_delete", f"#{decision_id}: {b['username']} {b['decision']} {b['operator_mm']}mm")
+        return None
+    except Exception:
+        return "db"
 
 
 def fetch_audit(limit=200):
@@ -1155,7 +1232,10 @@ def decision_log_df():
         "note": L("Reason / note", "Alasan / catatan"),
         "new_moisture": L("Soil moisture after (simulated, %)", "Kelembapan tanah setelah (simulasi, %)"),
         "status": L("Field response (simulated)", "Respons lapangan (simulasi)"),
+        "edited_by": L("Edited by", "Diedit oleh"),
     }
+    if is_admin():   # ID hanya ditampilkan untuk admin (dipakai saat mengubah/menghapus)
+        cols = {"id": "ID", **cols}
     source = None
     if DB_ACTIVE:
         try:
@@ -1436,18 +1516,24 @@ if not st.session_state.get("_prefs_loaded"):
         st.session_state["sb_collapsed"] = _qp.get("sb") == "1"
     if _qp.get("page") in _PAGES_OK:
         st.session_state["_want_page"] = _qp.get("page")
-if st.session_state.get("user") is None and DB_ACTIVE and not st.session_state.get("_restore_tried"):
-    st.session_state["_restore_tried"] = True
-    try:
-        _tok = st.context.cookies.get(COOKIE_NAME)
-        _restored = session_user(_tok) if _tok else None
-        if _restored:
-            st.session_state["user"] = _restored
-            st.session_state["_session_token"] = _tok
-            st.session_state["_user_checked"] = time.time()
-            st.session_state["page"] = st.session_state.pop("_want_page", "overview")
-    except Exception:
-        pass
+sync_browser_session()   # pulihkan sesi dari token di browser (localStorage), bila ada
+
+# Batas tidak aktif: tanpa interaksi > 30 menit -> keluar otomatis.
+if st.session_state.get("user"):
+    _t = time.time()
+    if _t - st.session_state.get("_last_activity", _t) > IDLE_SECONDS:
+        audit("session_timeout")
+        logout()
+        st.session_state["_expired"] = True
+    else:
+        st.session_state["_last_activity"] = _t
+        _stok = st.session_state.get("_session_token")
+        if DB_ACTIVE and _stok and _t - st.session_state.get("_touched", 0) > 60:
+            try:
+                touch_session(_stok)
+            except Exception:
+                pass
+            st.session_state["_touched"] = _t
 # Status sidebar (False = lebar penuh, True = mini-sidebar ikon saja). Dipakai CSS & menu.
 COLLAPSED = bool(st.session_state["sb_collapsed"])
 
@@ -2455,6 +2541,7 @@ TOOLTIP_CSS = f"""
         box-shadow:0 8px 24px rgba(2,8,23,{'.35' if IS_DARK else '.12'})!important;
       }}
       [data-testid="stTooltipContent"] *{{color:{THEME['text']}!important;}}
+      .st-key-somat_sess{{position:absolute!important;width:0!important;height:0!important;overflow:hidden!important;margin:0!important;}}
       [data-baseweb="tooltip"] > div,[data-baseweb="popover"] > div{{background:transparent!important;}}
 """
 
@@ -2604,7 +2691,6 @@ st.button(
 )
 
 
-flush_cookie_action()   # tulis/hapus cookie sesi bila diminta (login/logout)
 
 
 def _sync_url(with_page):
@@ -2619,6 +2705,19 @@ def _sync_url(with_page):
     for _k, _v in want.items():
         if st.query_params.get(_k) != _v:
             st.query_params[_k] = _v
+
+
+def render_restoring_screen():
+    """Tampil sebentar saat memeriksa sesi tersimpan (sebelum layar login)."""
+    st.markdown('<div class="login-page-spacer"></div>', unsafe_allow_html=True)
+    st.markdown(
+        f'''<div style="text-align:center;padding:3rem 0;opacity:.9"><img src="{LOGO_SRC}" alt="SOMAT" style="width:64px">
+        <p>{L("Checking your session…", "Memeriksa sesi Anda…")}</p></div>''',
+        unsafe_allow_html=True,
+    )
+    if st.button(L("Go to sign in", "Ke halaman masuk"), key="skip_restore"):
+        st.session_state["_restore_tried"] = True
+        st.rerun()
 
 
 def render_login_screen():
@@ -2652,6 +2751,9 @@ def render_login_screen():
         )
         st.header(L("Welcome back", "Selamat datang kembali"))
         st.caption(L("Sign in with your registered account to access the dashboard.", "Masuk menggunakan akun terdaftar untuk mengakses dashboard."))
+        if st.session_state.pop("_expired", False):
+            st.warning(L("Your session expired after 30 minutes of inactivity. Please sign in again.",
+                         "Sesi berakhir setelah 30 menit tidak aktif. Silakan masuk kembali."))
         render_login_form("login_form")
         st.caption(L("Access is managed by the SOMAT administrator.", "Hak akses dikelola oleh administrator SOMAT."))
 
@@ -2661,6 +2763,10 @@ if not DB_ACTIVE:
     st.session_state["user"] = None
 else:
     refresh_user()
+
+if (not current_user()) and DB_ACTIVE and _SESS_COMPONENT is not None and not st.session_state.get("_restore_tried"):
+    render_restoring_screen()
+    st.stop()
 
 if not current_user():
     st.session_state["page"] = "login"
@@ -3184,11 +3290,51 @@ elif page == "operator":
     st.subheader(L("📋 Decision History (saved permanently)", "📋 Riwayat Keputusan (tersimpan permanen)")
                  if DB_ACTIVE else L("📋 Decision History (this session only)", "📋 Riwayat Keputusan (sesi ini saja)"))
     if _u:
+        if "dec_flash" in st.session_state:
+            st.success(st.session_state.pop("dec_flash"))
         _hist = decision_log_df()
         if len(_hist):
             render_interactive_table(_hist, key="decision_history", hide_index=True)
         else:
             st.info(L("No operator decisions recorded yet.", "Belum ada keputusan operator yang tercatat."))
+
+        # Hanya admin: ubah / hapus catatan riwayat (server memeriksa peran lagi sebelum menyimpan).
+        if is_admin() and DB_ACTIVE and len(_hist):
+            with st.expander(L("🛠️ Edit or delete a record (admin only)", "🛠️ Ubah atau hapus catatan (khusus admin)")):
+                st.caption(L("Only the decision, amount, duration and note can be edited. The SOMAT recommendation and the "
+                             "simulated field response are not recalculated. Every change is written to the audit log.",
+                             "Yang dapat diubah: keputusan, jumlah, durasi, dan catatan. Rekomendasi SOMAT dan respons lapangan "
+                             "simulasi tidak dihitung ulang. Setiap perubahan tercatat di log audit."))
+                _drows = load_decisions_db()
+                _dopts = {r["id"]: f"#{r['id']} · {fmt_ts(r['ts'])} · {r['username']} · {r['decision']}" for r in _drows}
+                _dsel = st.selectbox(L("Select record", "Pilih catatan"), list(_dopts), format_func=lambda i: _dopts[i], key="dec_sel")
+                _cur = next(r for r in _drows if r["id"] == _dsel)
+                with st.form(f"dec_edit_form_{_dsel}"):
+                    _edec = st.selectbox(L("Decision", "Keputusan"), DECISION_TYPES,
+                                         index=DECISION_TYPES.index(_cur["decision"]) if _cur["decision"] in DECISION_TYPES else 0)
+                    _emm = st.number_input(L("Operator irrigation (mm)", "Irigasi operator (mm)"), min_value=0.0, max_value=1000.0,
+                                           value=float(_cur["operator_mm"] or 0.0), step=0.5)
+                    _eh = st.number_input(L("Operator duration (h)", "Durasi operator (jam)"), min_value=0.0, max_value=240.0,
+                                          value=float(_cur["duration_h"] or 0.0), step=0.5)
+                    _enote = st.text_area(L("Reason / note", "Alasan / catatan"), value=_cur["note"] or "")
+                    _esave = st.form_submit_button(L("Save changes", "Simpan perubahan"), type="primary")
+                if _esave:
+                    _err = update_decision(_dsel, _edec, _emm, _eh, _enote)
+                    if _err:
+                        st.error(auth_msg(_err))
+                    else:
+                        st.session_state["dec_flash"] = L(f"Record #{_dsel} updated.", f"Catatan #{_dsel} diperbarui.")
+                        st.rerun()
+                st.divider()
+                _ok = st.checkbox(L("I understand this permanently deletes the selected record.",
+                                    "Saya mengerti catatan terpilih akan dihapus permanen."), key=f"dec_del_ok_{_dsel}")
+                if st.button(L("🗑️ Delete record", "🗑️ Hapus catatan"), key="dec_del_btn", disabled=not _ok):
+                    _err = delete_decision(_dsel)
+                    if _err:
+                        st.error(auth_msg(_err))
+                    else:
+                        st.session_state["dec_flash"] = L(f"Record #{_dsel} deleted.", f"Catatan #{_dsel} dihapus.")
+                        st.rerun()
 
 
 # ============================================================
@@ -3435,3 +3581,4 @@ elif page == "admin":
                 } for r in _aud]), key="admin_audit", hide_index=True)
             else:
                 st.info(L("No events yet.", "Belum ada kejadian."))
+
