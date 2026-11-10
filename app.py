@@ -37,6 +37,7 @@ from bmkg_integration import (
     render_bmkg_forecast_panel,
     render_bmkg_warning_panel,
 )
+from sensor_sheet import load_sensor_sheet_data
 
 # ---------------- Language (EN / ID) ----------------
 # Bahasa awal: English (untuk juri). Pengguna dapat pindah ke Indonesia lewat tombol EN/ID.
@@ -69,7 +70,7 @@ def generate_simulated_data(days=30, seed=42):
     rng = np.random.default_rng(seed)
 
     # Daftar tanggal: 30 hari berakhir hari ini
-    dates = pd.date_range(end=pd.Timestamp.today().normalize(), periods=days)
+    dates = pd.date_range(end=pd.Timestamp.now(tz="Asia/Jakarta").tz_localize(None).normalize(), periods=days)
 
     # Hujan: kebanyakan hari kering, kadang hujan
     is_rainy = rng.random(days) < 0.25
@@ -1373,6 +1374,9 @@ SENSORS = [
      "location": "Stasiun hujan eksternal (simulasi; nanti BMKG/BBWS)", "unit": "mm"},
 ]
 
+# Daftar tetap khusus generator fallback agar konfigurasi live tidak mengubah data simulasi.
+SIMULATED_SENSORS = [dict(sensor) for sensor in SENSORS]
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def generate_sensor_readings(hours=168, seed=7):
@@ -1382,7 +1386,7 @@ def generate_sensor_readings(hours=168, seed=7):
     diganti dengan pembaca data sensor; bagian lain tidak perlu berubah.
     """
     rng = np.random.default_rng(seed)
-    times = pd.date_range(end=pd.Timestamp.now().floor("h"), periods=hours, freq="h")
+    times = pd.date_range(end=pd.Timestamp.now(tz="Asia/Jakarta").tz_localize(None).floor("h"), periods=hours, freq="h")
 
     # Hujan per jam: jarang terjadi, kadang deras
     rain = np.where(rng.random(hours) < 0.04, rng.gamma(2.0, 3.0, hours), 0.0)
@@ -1408,7 +1412,7 @@ def generate_sensor_readings(hours=168, seed=7):
 
     # Susun menjadi satu tabel panjang
     frames = []
-    for s in SENSORS:
+    for s in SIMULATED_SENSORS:
         v = values[s["sensor_id"]].copy()
         missing = rng.random(hours) < 0.01      # sekitar 1% data hilang
         if s["sensor_id"] == "SM-04":
@@ -1427,61 +1431,264 @@ def generate_sensor_readings(hours=168, seed=7):
 
 
 # ---------------- Ringkasan sensor -> kondisi terbaru ----------------
-def summarize_sensors(sensor_df):
-    """Mengubah pembacaan sensor per jam menjadi kondisi terbaru untuk SOMAT."""
-    ok = sensor_df[sensor_df["status"] == "OK"]
+def _wib_now_naive():
+    """Waktu sekarang dalam WIB tanpa timezone, agar konsisten dengan sensor_sheet.py."""
+    return pd.Timestamp.now(tz="Asia/Jakarta").tz_localize(None)
 
-    # Kelembapan tanah: ambil pembacaan valid terakhir tiap sensor, lalu rata-rata
+
+def _rainfall_increments(rf):
+    """
+    Mengubah pembacaan hujan menjadi nilai per interval.
+    interval_mm: nilai sudah merupakan hujan pada interval tersebut.
+    cumulative_mm: nilai penghitung kumulatif, dikonversi memakai selisih.
+    """
+    if rf.empty:
+        return rf.assign(rain_increment=pd.Series(dtype=float))
+
+    out = rf.copy().sort_values("timestamp")
+    out["value"] = pd.to_numeric(out["value"], errors="coerce")
+    out = out.dropna(subset=["timestamp", "value"])
+
+    if "measurement_mode" not in out.columns:
+        out["measurement_mode"] = "interval_mm"
+    out["measurement_mode"] = (
+        out["measurement_mode"].fillna("interval_mm").astype(str).str.lower()
+    )
+
+    increments = pd.Series(index=out.index, dtype=float)
+    for _, group in out.groupby("sensor_id", sort=False):
+        mode = str(group["measurement_mode"].iloc[-1]).lower()
+        values = group["value"].astype(float)
+
+        if mode == "cumulative_mm":
+            delta = values.diff()
+            # Counter pertama dalam jendela tidak dianggap sebagai hujan interval.
+            if len(delta):
+                delta.iloc[0] = 0.0
+            # Jika counter reset, nilai baru dianggap akumulasi setelah reset.
+            reset = delta < 0
+            delta.loc[reset] = values.loc[reset]
+            increments.loc[group.index] = delta.clip(lower=0)
+        else:
+            increments.loc[group.index] = values.clip(lower=0)
+
+    out["rain_increment"] = increments.fillna(0.0)
+    return out
+
+
+def _rainfall_total_last_24h(rf, now=None):
+    """Akumulasi hujan aktual dalam 24 jam terakhir sesuai mode pengukuran."""
+    if rf.empty:
+        return np.nan
+
+    now = now or _wib_now_naive()
+    cutoff = now - pd.Timedelta(hours=24)
+    increments = _rainfall_increments(rf)
+    recent = increments[increments["timestamp"] >= cutoff]
+    if recent.empty:
+        return np.nan
+    return float(recent["rain_increment"].sum())
+
+
+def summarize_sensors(sensor_df, sensor_config=None, fallback_summary=None):
+    """
+    Mengubah pembacaan sensor menjadi input kondisi terbaru SOMAT.
+
+    Sensor tanah dan muka air hanya dipakai untuk keputusan jika pembacaan
+    valid masih segar (maksimum 3 jam). Jika tidak tersedia, nilai simulasi
+    digunakan sebagai fallback yang ditandai pada sumber data dashboard.
+    Curah hujan aktual dihitung dari 24 jam terakhir; jika rain gauge belum
+    tersedia/aktif, nilai simulasi tetap dipakai untuk menjaga prototype.
+    """
+    now = _wib_now_naive()
+    fallback_summary = fallback_summary or {}
+    sensor_config = sensor_config or []
+
+    if sensor_df is None or sensor_df.empty:
+        valid = pd.DataFrame()
+    else:
+        work = sensor_df.copy()
+        for column, default in (
+            ("timestamp", pd.NaT),
+            ("status", "NO DATA"),
+            ("value", np.nan),
+            ("sensor_type", ""),
+            ("sensor_id", ""),
+        ):
+            if column not in work.columns:
+                work[column] = default
+        work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
+        work["value"] = pd.to_numeric(work["value"], errors="coerce")
+        work["status"] = work["status"].fillna("").astype(str).str.upper()
+        valid = work[
+            (work["status"] == "OK")
+            & work["value"].notna()
+            & work["timestamp"].notna()
+        ].copy()
+
+    fresh_cutoff = now - pd.Timedelta(hours=3)
+    fresh = valid[valid["timestamp"] >= fresh_cutoff] if not valid.empty else valid
+
+    # Kelembapan tanah: nilai valid terbaru setiap sensor, lalu rata-rata sensor aktif.
     sm_last = (
-        ok[ok["sensor_type"] == "soil_moisture"]
+        fresh[fresh["sensor_type"] == "soil_moisture"]
         .sort_values("timestamp")
         .groupby("sensor_id")
         .tail(1)
+        if not fresh.empty else pd.DataFrame()
     )
-    soil_moisture = float(sm_last["value"].mean())
+    fallback_inputs = []
+    if not sm_last.empty:
+        soil_moisture = float(sm_last["value"].mean())
+    else:
+        soil_moisture = fallback_summary.get("soil_moisture", np.nan)
+        fallback_inputs.append("soil moisture")
 
-    # Muka air: pembacaan valid terakhir WL-01
-    wl = ok[ok["sensor_type"] == "water_level"].sort_values("timestamp")
-    water_level = float(wl["value"].iloc[-1])
+    # Muka air: pembacaan valid terbaru yang masih segar.
+    wl = (
+        fresh[fresh["sensor_type"] == "water_level"].sort_values("timestamp")
+        if not fresh.empty else pd.DataFrame()
+    )
+    if not wl.empty:
+        water_level = float(wl["value"].iloc[-1])
+    else:
+        water_level = fallback_summary.get("water_level", np.nan)
+        fallback_inputs.append("water level")
 
-    # Hujan: jumlah 24 jam terakhir
-    rf = ok[ok["sensor_type"] == "rainfall"].sort_values("timestamp")
-    rainfall_24h = float(rf["value"].tail(24).sum())
+    # Hujan: gunakan rain gauge aktual jika ada data dalam 24 jam terakhir.
+    rf = (
+        valid[valid["sensor_type"] == "rainfall"].sort_values("timestamp")
+        if not valid.empty else pd.DataFrame()
+    )
+    rainfall_24h = _rainfall_total_last_24h(rf, now=now) if not rf.empty else np.nan
+    if pd.isna(rainfall_24h):
+        rainfall_24h = fallback_summary.get("rainfall", np.nan)
+        fallback_inputs.append("rainfall")
 
-    # Kualitas data: persentase pembacaan valid
-    data_quality = 100 * len(ok) / len(sensor_df)
+    # Kualitas data live dihitung terhadap jumlah pembacaan yang diharapkan
+    # berdasarkan interval pada Sensor_Config. Tidak menghitung data simulasi.
+    quality_cutoff = now - pd.Timedelta(days=7)
+    valid_7d = (
+        valid[valid["timestamp"] >= quality_cutoff]
+        if not valid.empty else pd.DataFrame()
+    )
+
+    if sensor_config:
+        expected = 0
+        for config in sensor_config:
+            interval = max(1, int(config.get("expected_interval_min") or 30))
+            expected += int((7 * 24 * 60) / interval)
+        data_quality = min(
+            100.0, 100.0 * len(valid_7d) / expected
+        ) if expected else 0.0
+    elif sensor_df is not None and not sensor_df.empty:
+        work_ts = pd.to_datetime(sensor_df["timestamp"], errors="coerce")
+        received_7d = sensor_df[work_ts >= quality_cutoff]
+        data_quality = (
+            100.0 * len(valid_7d) / len(received_7d)
+            if len(received_7d) else 0.0
+        )
+    else:
+        data_quality = 0.0
 
     return {
-        "soil_moisture": round(soil_moisture, 1),
-        "water_level": round(water_level, 2),
-        "rainfall": round(rainfall_24h, 1),
-        "sensors_used": int(sm_last["sensor_id"].nunique()),
-        "data_quality": round(data_quality, 1),
+        "soil_moisture": round(float(soil_moisture), 1) if pd.notna(soil_moisture) else np.nan,
+        "water_level": round(float(water_level), 2) if pd.notna(water_level) else np.nan,
+        "rainfall": round(float(rainfall_24h), 1) if pd.notna(rainfall_24h) else np.nan,
+        "sensors_used": int(sm_last["sensor_id"].nunique()) if not sm_last.empty else 0,
+        "data_quality": round(float(data_quality), 1),
+        "fallback_inputs": fallback_inputs,
     }
 
 
 # ---------------- Status sensor (online/offline) ----------------
 def sensor_status_table(sensor_df, offline_after_hours=3):
-    """Menentukan tiap sensor Online atau Offline dari pembacaan valid terakhir."""
-    now = sensor_df["timestamp"].max()
-    ok = sensor_df[sensor_df["status"] == "OK"]
-    last_ok = ok.groupby("sensor_id")["timestamp"].max()
+    """Menentukan status sensor berdasarkan umur data valid terhadap waktu WIB saat ini."""
+    now = _wib_now_naive()
+    if sensor_df is None or sensor_df.empty:
+        ok = pd.DataFrame(columns=["sensor_id", "timestamp"])
+    else:
+        work = sensor_df.copy()
+        work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
+        work["status"] = work["status"].fillna("").astype(str).str.upper()
+        ok = work[
+            (work["status"] == "OK") & work["timestamp"].notna()
+        ].copy()
+
+    last_ok = (
+        ok.groupby("sensor_id")["timestamp"].max()
+        if not ok.empty else pd.Series(dtype="datetime64[ns]")
+    )
 
     rows = []
-    for s in SENSORS:
-        last = last_ok.get(s["sensor_id"])
-        if last is None or (now - last) > pd.Timedelta(hours=offline_after_hours):
+    for sensor in SENSORS:
+        sensor_id = sensor["sensor_id"]
+        last = last_ok.get(sensor_id)
+        threshold_hours = (
+            float(sensor.get("offline_after_min", offline_after_hours * 60)) / 60
+        )
+        if last is None or pd.isna(last) or (now - last) > pd.Timedelta(hours=threshold_hours):
             state = "Offline"
         else:
             state = "Online"
         rows.append({
-            "Sensor": s["sensor_id"],
-            "Jenis": s["sensor_type"],
-            "Lokasi": s["location"],
+            "Sensor": sensor_id,
+            "Jenis": sensor.get("sensor_type", ""),
+            "Lokasi": sensor.get("location", ""),
             "Status": state,
             "Data valid terakhir": last,
         })
     return pd.DataFrame(rows)
+
+
+def build_sensor_daily_history(sensor_df, fallback_sensor_df=None, days=14):
+    """
+    Membentuk seri harian untuk grafik yang sudah ada.
+    Data aktual dipakai jika tersedia; simulasi hanya mengisi jenis sensor
+    yang sama sekali belum memiliki sumber aktual (misalnya rain gauge belum aktif).
+    Hari tanpa pembacaan aktual dibiarkan kosong, bukan diisi angka buatan.
+    """
+    end_date = _wib_now_naive().normalize()
+    dates = pd.date_range(end=end_date, periods=days, freq="D")
+    result = pd.DataFrame({"date": dates})
+
+    def _valid_frame(frame):
+        if frame is None or frame.empty:
+            return pd.DataFrame()
+        work = frame.copy()
+        work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
+        work["value"] = pd.to_numeric(work["value"], errors="coerce")
+        work["status"] = work["status"].fillna("").astype(str).str.upper()
+        return work[
+            (work["status"] == "OK")
+            & work["timestamp"].notna()
+            & work["value"].notna()
+        ].copy()
+
+    def _series(frame, sensor_type):
+        data = _valid_frame(frame)
+        data = data[data["sensor_type"] == sensor_type].copy()
+        if data.empty:
+            return pd.Series(dtype=float)
+
+        data["date"] = data["timestamp"].dt.normalize()
+        if sensor_type == "rainfall":
+            increments = _rainfall_increments(data)
+            increments["date"] = increments["timestamp"].dt.normalize()
+            return increments.groupby("date")["rain_increment"].sum()
+        return data.groupby("date")["value"].mean()
+
+    for column, sensor_type in (
+        ("soil_moisture", "soil_moisture"),
+        ("water_level", "water_level"),
+        ("rainfall", "rainfall"),
+    ):
+        values = _series(sensor_df, sensor_type)
+        if values.empty and fallback_sensor_df is not None:
+            values = _series(fallback_sensor_df, sensor_type)
+        result[column] = result["date"].map(values)
+
+    return result
 
 
 # ============================================================
@@ -2841,9 +3048,9 @@ with st.sidebar:
             <div class="side-brand-sub">Smart Adaptive Irrigation Management System</div></div></div>""",
             unsafe_allow_html=True,
         )
-        st.error(L("⚠️ Prototype — Simulated Data", "⚠️ Prototype — Data Simulasi"))
+        st.error(L("⚠️ Prototype — Mixed Data Sources", "⚠️ Prototype — Sumber Data Campuran"))
         st.markdown(
-            f'<span class="sim-dot"></span>{L("Simulation mode running", "Mode simulasi berjalan")}',
+            f'<span class="sim-dot"></span>{L("Check the source notice before using sensor inputs", "Periksa pemberitahuan sumber data sebelum menggunakan input sensor")}',
             unsafe_allow_html=True,
         )
         st.markdown("#### Menu")
@@ -2922,21 +3129,145 @@ st.markdown(
     ''',
     unsafe_allow_html=True,
 )
-st.warning(L(
-    "PROTOTYPE — MIXED DATA SOURCES. Sensor readings and irrigation model outputs "
-    "are simulated; BMKG weather forecasts and early warnings are external public data.",
-    "PROTOTYPE — SUMBER DATA CAMPURAN. Pembacaan sensor dan keluaran model irigasi "
-    "masih berupa simulasi; prakiraan dan peringatan dini BMKG merupakan data publik eksternal."
-))
-
 # ---------------- Data + shared calculation ----------------
+# Data non-sensor (ET0, debit tersedia, CWR) tetap memakai model prototype.
+# Data sensor dibaca dari Google Sheets jika endpoint sudah dikonfigurasi.
 df = generate_simulated_data()
-sensor_df = generate_sensor_readings()
+sim_sensor_df = generate_sensor_readings()
+live_sensor_df, sensor_connection = load_sensor_sheet_data(hours=336, limit=15000)
+
+sensor_config = []
+sensor_live_active = bool(
+    sensor_connection.get("configured")
+    and sensor_connection.get("ok")
+    and live_sensor_df is not None
+    and not live_sensor_df.empty
+)
+
+if sensor_live_active:
+    sensor_df = live_sensor_df.copy()
+    sensor_config = sensor_connection.get("sensors") or []
+
+    # Daftar sensor aktif mengikuti Sensor_Config, sehingga sensor yang sengaja
+    # dinonaktifkan (misalnya RF-01 sebelum rain gauge tersedia) tidak dihitung offline.
+    if sensor_config:
+        SENSORS = [
+            {
+                "sensor_id": str(item.get("sensor_id", "")).strip(),
+                "sensor_type": str(item.get("sensor_type", "")).strip(),
+                "location": str(item.get("location", "")).strip(),
+                "unit": str(item.get("unit", "")).strip(),
+                "expected_interval_min": int(item.get("expected_interval_min") or 30),
+                "offline_after_min": int(item.get("offline_after_min") or 180),
+                "measurement_mode": str(item.get("measurement_mode") or "instantaneous"),
+            }
+            for item in sensor_config
+            if str(item.get("sensor_id", "")).strip()
+        ]
+
+    simulated_summary = summarize_sensors(sim_sensor_df)
+    sensor_summary = summarize_sensors(
+        sensor_df,
+        sensor_config=sensor_config,
+        fallback_summary=simulated_summary,
+    )
+    sensor_daily_df = build_sensor_daily_history(
+        sensor_df,
+        fallback_sensor_df=sim_sensor_df,
+        days=14,
+    )
+    sensor_source_mode = "LIVE"
+else:
+    # Jika koneksi belum disiapkan, belum ada data masuk, atau endpoint gagal,
+    # prototype tetap dapat dibuka menggunakan data simulasi yang sudah ada.
+    sensor_df = sim_sensor_df
+    sensor_summary = summarize_sensors(sensor_df)
+    sensor_daily_df = build_sensor_daily_history(sensor_df, days=14)
+    if sensor_connection.get("configured") and sensor_connection.get("ok"):
+        sensor_source_mode = "WAITING_FOR_DATA"
+    elif sensor_connection.get("configured"):
+        sensor_source_mode = "SIMULATION_FALLBACK"
+    else:
+        sensor_source_mode = "SIMULATION"
+
+sensor_fallback_inputs = sensor_summary.get("fallback_inputs", [])
+
+if sensor_source_mode == "LIVE":
+    if sensor_fallback_inputs:
+        fallback_text = ", ".join(sensor_fallback_inputs)
+        source_warning = L(
+            "PROTOTYPE — PARTIAL LIVE SENSOR DATA. Available sensor readings are received from Google Sheets. "
+            f"{fallback_text.capitalize()} still use simulation fallback. ET0 and available discharge remain prototype estimates; "
+            "BMKG forecasts and early warnings are external public data.",
+            "PROTOTYPE — DATA SENSOR LIVE SEBAGIAN. Pembacaan sensor yang tersedia diterima dari Google Sheets. "
+            f"{fallback_text} masih menggunakan simulasi sebagai fallback. ET0 dan debit tersedia tetap berupa estimasi prototype; "
+            "prakiraan dan peringatan dini BMKG merupakan data publik eksternal.",
+        )
+    else:
+        source_warning = L(
+            "PROTOTYPE — LIVE SENSOR INPUTS + MODEL ESTIMATES. Sensor readings are received from Google Sheets. "
+            "ET0, available discharge and crop-water model outputs remain prototype estimates; "
+            "BMKG forecasts and early warnings are external public data.",
+            "PROTOTYPE — INPUT SENSOR LIVE + ESTIMASI MODEL. Pembacaan sensor diterima dari Google Sheets. "
+            "ET0, debit tersedia, dan keluaran model kebutuhan air masih berupa estimasi prototype; "
+            "prakiraan dan peringatan dini BMKG merupakan data publik eksternal.",
+        )
+    sensor_source_caption = L(
+        "Sensor observations are read from Google Sheets. Model-derived values remain estimates; check sensor freshness and status before acting.",
+        "Pengamatan sensor dibaca dari Google Sheets. Nilai keluaran model tetap berupa estimasi; periksa kesegaran dan status sensor sebelum bertindak.",
+    )
+elif sensor_source_mode == "SIMULATION_FALLBACK":
+    source_warning = L(
+        "PROTOTYPE — GOOGLE SHEETS UNAVAILABLE. The dashboard is temporarily using simulation fallback. "
+        "Do not treat these values as field measurements. Check the sensor connection before operational use.",
+        "PROTOTYPE — GOOGLE SHEETS TIDAK TERJANGKAU. Dashboard sementara menggunakan simulasi sebagai fallback. "
+        "Jangan menganggap nilai ini sebagai hasil pengukuran lapangan. Periksa koneksi sensor sebelum digunakan secara operasional.",
+    )
+    sensor_source_caption = L(
+        "Google Sheets is configured but unavailable; the dashboard is showing simulation fallback.",
+        "Google Sheets sudah dikonfigurasi tetapi tidak dapat diakses; dashboard menampilkan simulasi sebagai fallback.",
+    )
+elif sensor_source_mode == "WAITING_FOR_DATA":
+    source_warning = L(
+        "PROTOTYPE — GOOGLE SHEETS CONNECTED, NO SENSOR READINGS YET. The endpoint is reachable, but no readings "
+        "have arrived in the last 14 days. The dashboard is temporarily showing simulation fallback.",
+        "PROTOTYPE — GOOGLE SHEETS TERHUBUNG, BELUM ADA PEMBACAAN SENSOR. Endpoint dapat diakses, tetapi belum ada "
+        "pembacaan dalam 14 hari terakhir. Dashboard sementara menampilkan simulasi sebagai fallback.",
+    )
+    sensor_source_caption = L(
+        "Google Sheets is reachable but has no sensor readings yet; the dashboard is showing simulation fallback.",
+        "Google Sheets dapat diakses tetapi belum memiliki pembacaan sensor; dashboard menampilkan simulasi sebagai fallback.",
+    )
+else:
+    source_warning = L(
+        "PROTOTYPE — MIXED DATA SOURCES. Sensor readings and irrigation model outputs are simulated; "
+        "BMKG weather forecasts and early warnings are external public data.",
+        "PROTOTYPE — SUMBER DATA CAMPURAN. Pembacaan sensor dan keluaran model irigasi masih berupa simulasi; "
+        "prakiraan dan peringatan dini BMKG merupakan data publik eksternal.",
+    )
+    sensor_source_caption = L(
+        "SIMULATED sensors (prototype). Connect the Google Sheets endpoint to use field readings.",
+        "Sensor SIMULASI (prototype). Hubungkan endpoint Google Sheets untuk menggunakan pembacaan lapangan.",
+    )
+
+st.warning(source_warning)
+
 latest = df.iloc[-1].copy()
-sensor_summary = summarize_sensors(sensor_df)
 latest["soil_moisture"] = sensor_summary["soil_moisture"]
 latest["water_level"] = sensor_summary["water_level"]
 latest["rainfall"] = sensor_summary["rainfall"]
+
+# CWR harian mengikuti rumus prototype yang sama, dengan kondisi tanah dan hujan
+# terbaru sebagai input; ET0 tetap berasal dari sumber model saat ini.
+latest["crop_water_requirement"] = round(
+    max(
+        0.0,
+        float(latest["et0"]) * 1.1
+        - 0.08 * (float(latest["soil_moisture"]) - 25)
+        - 0.4 * float(latest["rainfall"]),
+    ),
+    1,
+)
 
 prediction = predict_irrigation_requirement(
     soil_moisture=latest["soil_moisture"],
@@ -2981,7 +3312,7 @@ def status_row(ok, label, text):
 # ============================================================
 if page == "overview":
     st.header(L("Conditions Overview", "Ringkasan Kondisi (Overview)"))
-    st.caption(L("Latest conditions. All figures are prototype simulation data.", "Kondisi terbaru. Seluruh angka adalah data simulasi prototype."))
+    st.caption(L("Latest conditions. Sensor observations use Google Sheets when connected; model-derived inputs remain estimates.", "Kondisi terbaru. Pengamatan sensor menggunakan Google Sheets jika terhubung; input keluaran model tetap berupa estimasi."))
     sys_normal = system_status == "NORMAL"
     render_card_rows([
         dict(icon="🌱", title=L("Soil Moisture", "Kelembapan Tanah"), target=latest["soil_moisture"], decimals=1, suffix=" %",
@@ -3010,9 +3341,9 @@ if page == "overview":
     st.markdown(panel_html, unsafe_allow_html=True)
     st.write("")
     st.header(L("Latest Conditions Chart (Last 14 Days)", "Grafik Kondisi Terbaru (14 Hari Terakhir)"))
-    st.caption(L("Simulated data (prototype). Drag a chart to zoom the timeframe; Pan can be toggled from the toolbar.",
-                 "Data simulasi (prototype). Drag grafik untuk zoom timeframe; Pan dapat diaktifkan/nonaktifkan dari toolbar."))
-    render_plotly_interactive(make_combo_chart(df.tail(14)), height=360, key_prefix="summary")
+    st.caption(L("Sensor history is shown from the available readings. Drag a chart to zoom the timeframe; Pan can be toggled from the toolbar.",
+                 "Riwayat sensor ditampilkan berdasarkan pembacaan yang tersedia. Drag grafik untuk zoom timeframe; Pan dapat diaktifkan/nonaktifkan dari toolbar."))
+    render_plotly_interactive(make_combo_chart(sensor_daily_df.tail(14)), height=360, key_prefix="summary")
 
 
 # ============================================================
@@ -3026,8 +3357,7 @@ elif page == "monitoring":
     sm_online = int(((sensor_table["Jenis"] == "soil_moisture") & (sensor_table["Status"] == "Online")).sum())
 
     st.header(L("Sensor Monitoring", "Monitoring Sensor"))
-    st.caption(L("SIMULATED sensors (prototype). The rain station is simulated external data.",
-                 "Sensor SIMULASI (prototype). Stasiun hujan adalah data eksternal simulasi."))
+    st.caption(sensor_source_caption)
     render_bmkg_forecast_panel()
     st.divider()
 
@@ -3067,14 +3397,15 @@ elif page == "monitoring":
     st.divider()
 
     st.header("Monitoring")
-    st.caption(L("All charts below come from simulated data.", "Seluruh grafik di bawah berasal dari data simulasi."))
+    st.caption(L("Soil moisture, water level and rainfall trends use available sensor inputs; crop water requirement remains a prototype model output.",
+                 "Tren kelembapan tanah, muka air, dan curah hujan menggunakan input sensor yang tersedia; kebutuhan air tanaman tetap merupakan keluaran model prototype."))
     col1, col2 = st.columns(2, gap="medium")
     with col1:
-        show_animated(make_animated_line(df, "soil_moisture", L("🌱 Soil Moisture", "🌱 Kelembapan Tanah"), L("Soil moisture (%)", "Kelembapan tanah (%)")))
-        show_animated(make_animated_line(df, "water_level", L("🌊 Canal Water Level", "🌊 Tinggi Muka Air Saluran"), L("Water level (m)", "Tinggi muka air (m)"), color="#2F80ED"))
+        show_animated(make_animated_line(sensor_daily_df, "soil_moisture", L("🌱 Soil Moisture", "🌱 Kelembapan Tanah"), L("Soil moisture (%)", "Kelembapan tanah (%)")))
+        show_animated(make_animated_line(sensor_daily_df, "water_level", L("🌊 Canal Water Level", "🌊 Tinggi Muka Air Saluran"), L("Water level (m)", "Tinggi muka air (m)"), color="#2F80ED"))
     with col2:
         render_plotly_interactive(
-            make_line_chart(df, "rainfall", L("🌧️ Rainfall", "🌧️ Curah Hujan"), L("Rainfall (mm)", "Curah hujan (mm)"), bar=True),
+            make_line_chart(sensor_daily_df, "rainfall", L("🌧️ Rainfall", "🌧️ Curah Hujan"), L("Rainfall (mm)", "Curah hujan (mm)"), bar=True),
             height=340, key_prefix="rain",
         )
         show_animated(make_animated_line(df, "crop_water_requirement", L("🌾 Crop Water Requirement", "🌾 Kebutuhan Air Tanaman"), L("CWR (mm/day)", "KAT (mm/hari)"), color="#E87924"))
@@ -3083,8 +3414,8 @@ elif page == "monitoring":
         render_interactive_table(df, key="monitor_data", hide_index=False)
 
     # Tahap A sengaja HANYA ada di tab Monitoring Sensor.
-    with st.expander(L("Stage A: simulated sensor data", "Tahap A: data sensor simulasi")):
-        st.caption(L("SIMULATED sensors. Not real sensor data.", "Sensor SIMULASI. Bukan data sensor nyata."))
+    with st.expander(L("Stage A: sensor data", "Tahap A: data sensor")):
+        st.caption(sensor_source_caption)
         render_interactive_table(pd.DataFrame(SENSORS), key="sensor_definition", hide_index=True)
         st.write(L("Latest valid reading per sensor:", "Pembacaan valid terakhir tiap sensor:"))
         last_ok = (
@@ -3133,8 +3464,8 @@ elif page == "prediction":
 
     st.divider()
     st.header(L("🧭 SOMAT Recommendation", "🧭 Rekomendasi SOMAT"))
-    st.caption(L("System suggestion only. Awaiting operator validation. Simulated data.",
-                 "Hanya saran sistem. Menunggu validasi operator. Data simulasi."))
+    st.caption(L("System suggestion only. Awaiting operator validation. Review input source and freshness.",
+                 "Hanya saran sistem. Menunggu validasi operator. Periksa sumber dan kesegaran input."))
     feas_ok = recommendation["feasibility"] == "FEASIBLE"
     prio = recommendation["priority"]
     prio_label = {"HIGH": L("HIGH", "TINGGI"), "NORMAL": "NORMAL", "LOW": L("LOW", "RENDAH")}[prio]
@@ -3164,8 +3495,8 @@ elif page == "prediction":
 # ============================================================
 elif page == "alerts":
     st.header(L("🚨 Alerts / Anomalies", "🚨 Peringatan / Anomali"))
-    st.caption(L("Simulated alerts (rule-based). Alert thresholds are example numbers.",
-                 "Peringatan simulasi (berbasis aturan). Batas peringatan adalah angka contoh."))
+    st.caption(L("Rule-based alerts using the latest available inputs. Thresholds are prototype assumptions; verify source and freshness before acting.",
+                 "Peringatan berbasis aturan menggunakan input terbaru yang tersedia. Ambang batas merupakan asumsi prototype; periksa sumber dan kesegaran data sebelum bertindak."))
 
     render_bmkg_warning_panel()
     st.divider()
@@ -3183,8 +3514,8 @@ elif page == "alerts":
         st.warning(L("Abnormal conditions detected. The operator is asked to validate the recommendation carefully before deciding.",
                      "Kondisi abnormal terdeteksi. Operator diminta memvalidasi rekomendasi dengan teliti sebelum mengambil keputusan."))
     else:
-        st.success(L("✅ No active alerts. Conditions are within normal limits (simulated data).",
-                     "✅ Tidak ada peringatan aktif. Kondisi dalam batas normal (data simulasi)."))
+        st.success(L("✅ No active local alerts. Verify data source and freshness before operational action.",
+                     "✅ Tidak ada peringatan lokal aktif. Verifikasi sumber dan kesegaran data sebelum tindakan operasional."))
 
     st.subheader(L("🗂️ Recent Events", "🗂️ Kejadian Terbaru"))
     incidents = []
@@ -3218,8 +3549,8 @@ elif page == "alerts":
 elif page == "operator":
     refresh_user()
     st.header(L("👷 Operator Decision (Human in the Loop)", "👷 Keputusan Operator (Human in the Loop)"))
-    st.caption(L("SOMAT only gives suggestions. The operator makes the final decision. No irrigation gate is moved automatically. Simulated data.",
-                 "SOMAT hanya memberi saran. Operator adalah pengambil keputusan akhir. Tidak ada pintu irigasi yang digerakkan otomatis. Data simulasi."))
+    st.caption(L("SOMAT only gives suggestions. The operator makes the final decision. No irrigation gate is moved automatically. ",
+                 "SOMAT hanya memberi saran. Operator adalah pengambil keputusan akhir. Tidak ada pintu irigasi yang digerakkan otomatis. ") + sensor_source_caption)
 
     _u = current_user()
     if _u:
