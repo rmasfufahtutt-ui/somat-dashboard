@@ -53,7 +53,7 @@ def _xml_child_text(node, child_name):
     return ""
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=1500, show_spinner=False)
 def fetch_bmkg_forecast(adm4=BMKG_ADM4):
     """Prakiraan BMKG 3 hari (interval 3 jam) untuk kode desa ADM4."""
     try:
@@ -102,7 +102,7 @@ def fetch_bmkg_forecast(adm4=BMKG_ADM4):
         return {"ok": False, "error": type(exc).__name__}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=240, show_spinner=False)
 def fetch_bmkg_early_warnings():
     """Ambil CAP warning BMKG dan saring dampak yang menyebut Panongan/Jatitujuh/Majalengka."""
     try:
@@ -193,9 +193,14 @@ def fetch_bmkg_early_warnings():
         return {"ok": False, "error": type(exc).__name__}
 
 
+@st.fragment(run_every="30m")
 def render_bmkg_forecast_panel():
-    """Tampilkan prakiraan BMKG 3 hari per 3 jam; tidak mengubah input numerik model irigasi."""
+    """Auto-refresh prakiraan tiap 30 menit selama halaman Monitoring aktif."""
     st.subheader(_L("🌦️ BMKG Weather Forecast — Panongan", "🌦️ Prakiraan Cuaca BMKG — Panongan"))
+    st.caption(_L(
+        "Automatic refresh: every 30 minutes while this page is open. BMKG publishes forecast updates twice daily.",
+        "Pembaruan otomatis: setiap 30 menit selama halaman ini terbuka. BMKG menerbitkan pembaruan prakiraan dua kali sehari.",
+    ))
     result = fetch_bmkg_forecast()
     st.caption(_L(
         "Reference location: Panongan Village, Jatitujuh, Majalengka (ADM4 32.10.15.2003).",
@@ -262,9 +267,14 @@ def render_bmkg_forecast_panel():
         ))
 
 
+@st.fragment(run_every="5m")
 def render_bmkg_warning_panel():
-    """Tampilkan CAP warning yang area dampaknya menyebut Panongan/Jatitujuh/Majalengka."""
+    """Auto-refresh peringatan dini tiap 5 menit selama halaman Alerts aktif."""
     st.subheader(_L("⚠️ BMKG Early Weather Warnings", "⚠️ Peringatan Dini Cuaca BMKG"))
+    st.caption(_L(
+        "Automatic refresh: every 5 minutes while this page is open.",
+        "Pembaruan otomatis: setiap 5 menit selama halaman ini terbuka.",
+    ))
     result = fetch_bmkg_early_warnings()
     st.caption(_L(
         "Only active CAP warnings whose affected-area text mentions Panongan, Jatitujuh, or Majalengka are shown.",
