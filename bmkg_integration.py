@@ -246,15 +246,20 @@ def render_bmkg_forecast_panel():
             _L("Cloud cover (%)", "Tutupan awan (%)"): row.get("cloud_cover") if row.get("cloud_cover") is not None else "—",
             _L("Visibility", "Jarak pandang"): row.get("visibility") or "—",
         })
-    st.dataframe(pd.DataFrame(table_rows), hide_index=True, width="stretch")
+    # Keep the compact weather summary visible; expand the full forecast table only when needed.
     st.caption(_L(
-        f"BMKG forecast updated at {result.get('analysis_date') or 'time not supplied'} · Retrieved {result.get('fetched_at')}.",
-        f"Pembaruan prakiraan BMKG: {result.get('analysis_date') or 'waktu tidak tersedia'} · Diambil {result.get('fetched_at')}.",
+        f"BMKG forecast updated at {result.get('analysis_date') or 'time not supplied'} · Last checked {result.get('fetched_at')}.",
+        f"Pembaruan prakiraan BMKG: {result.get('analysis_date') or 'waktu tidak tersedia'} · Terakhir diperiksa {result.get('fetched_at')}.",
     ))
-    st.caption(_L(
-        "Source: BMKG Open Weather Data. The sample JSON may include `tp`; BMKG's public parameter list does not define its unit/accumulation period, so it is displayed as supplied but is not yet used in the irrigation calculation. The numeric rainfall input remains the RF-01 simulated reading.",
-        "Sumber: Data Terbuka BMKG. Contoh JSON dapat memuat `tp`; daftar parameter publik BMKG belum menjelaskan satuan/periode akumulasinya, sehingga nilai ditampilkan sebagaimana diterima tetapi belum digunakan dalam perhitungan irigasi. Input curah hujan numerik tetap berasal dari pembacaan simulasi RF-01.",
-    ))
+    with st.expander(
+        _L("View full 3-day forecast (3-hour intervals)", "Tampilkan prakiraan lengkap 3 hari (interval 3 jam)"),
+        expanded=False,
+    ):
+        st.dataframe(pd.DataFrame(table_rows), hide_index=True, width="stretch")
+        st.caption(_L(
+            "Source: BMKG Open Weather Data. The sample JSON may include `tp`; BMKG's public parameter list does not define its unit/accumulation period, so it is displayed as supplied but is not yet used in the irrigation calculation. The numeric rainfall input remains the RF-01 simulated reading.",
+            "Sumber: Data Terbuka BMKG. Contoh JSON dapat memuat `tp`; daftar parameter publik BMKG belum menjelaskan satuan/periode akumulasinya, sehingga nilai ditampilkan sebagaimana diterima tetapi belum digunakan dalam perhitungan irigasi. Input curah hujan numerik tetap berasal dari pembacaan simulasi RF-01.",
+        ))
 
 
 def render_bmkg_warning_panel():
