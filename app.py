@@ -1441,7 +1441,13 @@ def _history_css():
     .lbl{{display:none;font-size:.68rem;font-weight:800;letter-spacing:.04em;text-transform:uppercase;opacity:.6;margin-bottom:1px;}}
     .chip{{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.72rem;font-weight:800;color:#fff;}}
     .chip.APPROVE{{background:#16884A;}} .chip.MODIFY{{background:#D85A10;}} .chip.DELAY{{background:#256FD1;}}
-    [class*="st-key-dec_act_"] button{{padding:.2rem .6rem;min-height:2rem;font-size:.8rem;white-space:nowrap;}}
+    /* tombol kecil & presisi; selector lebih spesifik agar menang atas gaya tombol global */
+    .block-container [data-testid="stHorizontalBlock"] [class*="st-key-dec_act_"] .stButton button,
+    .block-container [class*="st-key-dec_pager"] [data-testid="stHorizontalBlock"] .stButton button{{
+      min-height:2.1rem !important;height:2.1rem;padding:0 .7rem !important;border-radius:9px !important;white-space:nowrap;}}
+    .block-container [data-testid="stHorizontalBlock"] [class*="st-key-dec_act_"] .stButton button p,
+    .block-container [class*="st-key-dec_pager"] [data-testid="stHorizontalBlock"] .stButton button p{{
+      font-size:.82rem !important;font-weight:700 !important;letter-spacing:0 !important;line-height:1 !important;}}
 
     /* Lebar tabel < 860px (ponsel / tablet / sidebar terbuka): tiap catatan menjadi kartu */
     @container dectable (max-width: 860px){{
@@ -1459,7 +1465,7 @@ def _history_css():
       [class*="st-key-dec_row_"] [data-testid="stColumn"]:nth-child(n+6){{order:6;}}
       [class*="st-key-dec_act_"] [data-testid="stHorizontalBlock"]{{flex-wrap:nowrap !important;gap:.5rem !important;}}
       [class*="st-key-dec_act_"] [data-testid="stColumn"]{{flex:1 1 0 !important;min-width:0 !important;width:auto !important;}}
-      [class*="st-key-dec_act_"] button{{min-height:2.4rem;}}
+      .block-container [data-testid="stHorizontalBlock"] [class*="st-key-dec_act_"] .stButton button{{min-height:2.5rem !important;height:2.5rem;}}
     }}
     </style>"""
 
@@ -1520,14 +1526,15 @@ def render_decision_history_grid(rows):
                                          help=L("Delete this record", "Hapus catatan ini")):
                                 _delete_decision_dialog(r["id"])
 
-    n1, n2, n3 = st.columns([1, 2, 1], vertical_alignment="center")
-    if n1.button(L("◀ Newer", "◀ Lebih baru"), key="dec_prev", disabled=pg <= 0):
-        st.session_state["dec_page"] = pg - 1
-        st.rerun()
-    n2.caption(L(f"Page {pg + 1} of {pages} · {total} records", f"Halaman {pg + 1} dari {pages} · {total} catatan"))
-    if n3.button(L("Older ▶", "Lebih lama ▶"), key="dec_next", disabled=pg >= pages - 1):
-        st.session_state["dec_page"] = pg + 1
-        st.rerun()
+    with st.container(key="dec_pager"):
+        n1, n2, n3 = st.columns([1, 2, 1], vertical_alignment="center")
+        if n1.button(L("◀ Newer", "◀ Lebih baru"), key="dec_prev", disabled=pg <= 0):
+            st.session_state["dec_page"] = pg - 1
+            st.rerun()
+        n2.caption(L(f"Page {pg + 1} of {pages} · {total} records", f"Halaman {pg + 1} dari {pages} · {total} catatan"))
+        if n3.button(L("Older ▶", "Lebih lama ▶"), key="dec_next", disabled=pg >= pages - 1):
+            st.session_state["dec_page"] = pg + 1
+            st.rerun()
 
 
 # ---------------- Alerts / anomaly (PROTOTYPE) ----------------
