@@ -1429,18 +1429,19 @@ def _delete_decision_dialog(rec_id):
 
 
 def render_decision_history_grid(rows):
-    """Tabel riwayat per baris; kolom terakhir berisi tombol edit (admin & operator) / hapus (admin)."""
+    """Satu tabel riwayat: semua kolom + kolom terakhir Aksi (Edit untuk admin & operator, Delete untuk admin)."""
     total = len(rows)
     pages = max(1, -(-total // HIST_PAGE_SIZE))
     pg = min(max(int(st.session_state.get("dec_page", 0)), 0), pages - 1)
     st.session_state["dec_page"] = pg
     chunk = rows[pg * HIST_PAGE_SIZE:(pg + 1) * HIST_PAGE_SIZE]
 
-    weights = [1.55, 1.0, 1.05, 0.9, 0.9, 0.8, 2.1, 1.5, 0.95]
+    weights = [1.45, 0.9, 1.0, 0.8, 0.85, 0.75, 1.7, 0.95, 1.2, 0.9, 1.7]
     heads = [L("Time (WIB)", "Waktu (WIB)"), L("Operator", "Operator"), L("Decision", "Keputusan"),
              L("SOMAT (mm)", "SOMAT (mm)"), L("Operator (mm)", "Operator (mm)"), L("Duration (h)", "Durasi (jam)"),
-             L("Reason / note", "Alasan / catatan"), L("Field response (sim.)", "Respons lapangan (sim.)"),
-             L("Actions", "Aksi")]
+             L("Reason / note", "Alasan / catatan"), L("Moisture after (sim., %)", "Lembap setelah (sim., %)"),
+             L("Field response (sim.)", "Respons lapangan (sim.)"), L("Edited by", "Diedit oleh"),
+             L("Action", "Aksi")]
     hc = st.columns(weights)
     for col, h in zip(hc, heads):
         col.markdown(f"**{h}**")
@@ -1453,19 +1454,20 @@ def render_decision_history_grid(rows):
         c[3].caption(f"{float(r['recommended_mm'] or 0):.1f}")
         c[4].caption(f"{float(r['operator_mm'] or 0):.1f}")
         c[5].caption(f"{float(r['duration_h'] or 0):.1f}")
-        note_txt = str(r.get("note") or "").replace("\n", " ")
-        if r.get("edited_by"):
-            note_txt += L(f"  _(edited by {r['edited_by']})_", f"  _(diedit oleh {r['edited_by']})_")
-        c[6].markdown(note_txt or "-")
+        c[6].markdown(str(r.get("note") or "").replace("\n", " ") or "-")
+        c[7].caption("-" if r.get("new_moisture") is None else f"{float(r['new_moisture']):.1f}")
         stt = field_status_text(r["status"]) if r.get("status") in ("below", "on", "above") else (r.get("status") or "-")
-        c[7].caption(f"{r.get('new_moisture')}% · {stt}" if r.get("new_moisture") is not None else str(stt))
-        with c[8]:
+        c[8].caption(str(stt))
+        c[9].caption(str(r.get("edited_by") or "-"))
+        with c[10]:
             a1, a2 = st.columns(2, gap="small")
             if _can_edit_decision(r):
-                if a1.button("✏️", key=f"dec_edit_{r['id']}", help=L("Edit this record", "Ubah catatan ini")):
+                if a1.button(L("Edit", "Edit"), key=f"dec_edit_{r['id']}", width="stretch",
+                             help=L("Edit this record", "Ubah catatan ini")):
                     _edit_decision_dialog(r["id"])
             if is_admin():
-                if a2.button("🗑️", key=f"dec_del_{r['id']}", help=L("Delete this record", "Hapus catatan ini")):
+                if a2.button(L("Delete", "Delete"), key=f"dec_del_{r['id']}", width="stretch",
+                             help=L("Delete this record", "Hapus catatan ini")):
                     _delete_decision_dialog(r["id"])
 
     n1, n2, n3 = st.columns([1, 2, 1])
@@ -3854,12 +3856,10 @@ elif page == "operator":
         if p is not None:
             if approve:
                 _record("APPROVE", p["mm"], p["hours"], note, "approve", p)
+            if delay:
+                _record("DELAY", 0.0, 0.0, note.strip() or L("Postponed by operator", "Ditunda oleh operator"), "delay", p)
             if modify:
                 st.session_state["show_modify"] = True
-                st.session_state["show_delay"] = False
-            if delay:
-                st.session_state["show_delay"] = True
-                st.session_state["show_modify"] = False
 
         with cards_slot:
             if p is None:
@@ -3902,21 +3902,6 @@ elif page == "operator":
                             st.warning(L("A reason is required before saving a MODIFY decision.", "Alasan wajib diisi sebelum menyimpan keputusan MODIFY."))
                         else:
                             _record("MODIFY", mod_mm, mod_hours, mod_reason, "modify", p)
-                elif st.session_state.get("show_delay"):
-                    render_card_rows(_cards, columns=4)
-                    with st.form(f"delay_form_{pid_key}"):
-                        with st.container(border=True):
-                            st.markdown(L("**⏸️ Delay irrigation, reason**", "**⏸️ Tunda irigasi, alasan**"))
-                            delay_reason = st.text_area("delay reason", label_visibility="collapsed", key=f"delay_reason_{pid_key}",
-                                                        placeholder=L("Why is irrigation postponed? (optional)", "Mengapa irigasi ditunda? (opsional)"))
-                        d1, d2 = st.columns(2)
-                        d_ok = d1.form_submit_button(L("Confirm DELAY", "Konfirmasi DELAY"), type="primary", width="stretch")
-                        d_cancel = d2.form_submit_button(L("Cancel", "Batal"), width="stretch")
-                    if d_cancel:
-                        st.session_state["show_delay"] = False
-                        st.rerun()
-                    if d_ok:
-                        _record("DELAY", 0.0, 0.0, delay_reason.strip() or note or L("Postponed by operator", "Ditunda oleh operator"), "delay", p)
                 else:
                     render_card_rows(_cards, columns=4)
     elif not _u:
@@ -3949,33 +3934,39 @@ elif page == "operator":
         st.info(L("No decisions yet. Make an operator decision to see the feedback flow.",
                   "Belum ada keputusan. Buat keputusan operator untuk melihat alur feedback."))
 
-    st.subheader(L("📋 Decision History (saved permanently)", "📋 Riwayat Keputusan (tersimpan permanen)")
-                 if DB_ACTIVE else L("📋 Decision History (this session only)", "📋 Riwayat Keputusan (sesi ini saja)"))
-    if _u:
-        if "dec_flash" in st.session_state:
-            st.success(st.session_state.pop("dec_flash"))
-        _grid_rows = []
-        if DB_ACTIVE and (is_admin() or can_decide()):
-            try:
-                _grid_rows = load_decisions_db()
-            except Exception:
-                st.session_state["db_error"] = True
-        if _grid_rows:
-            if is_admin():
-                st.caption(L("✏️ edit and 🗑️ delete are available to administrators. Every change is written to the audit log.",
-                             "✏️ ubah dan 🗑️ hapus tersedia untuk administrator. Setiap perubahan tercatat di log audit."))
+    with st.expander(
+        L("📋 Decision History (saved permanently)", "📋 Riwayat Keputusan (tersimpan permanen)")
+        if DB_ACTIVE else L("📋 Decision History (this session only)", "📋 Riwayat Keputusan (sesi ini saja)"),
+        expanded=True,
+    ):
+        if _u:
+            if "dec_flash" in st.session_state:
+                st.success(st.session_state.pop("dec_flash"))
+            _grid_rows = []
+            if DB_ACTIVE and (is_admin() or can_decide()):
+                try:
+                    _grid_rows = load_decisions_db()
+                except Exception:
+                    st.session_state["db_error"] = True
+            if _grid_rows:
+                if is_admin():
+                    st.caption(L("Edit and Delete are available to administrators. Every change is written to the audit log.",
+                                 "Edit dan Delete tersedia untuk administrator. Setiap perubahan tercatat di log audit."))
+                else:
+                    st.caption(L("Edit lets you correct a mistake in a record you entered. Every change is written to the audit log.",
+                                 "Edit dipakai untuk mengoreksi kesalahan pada catatan yang Anda input. Setiap perubahan tercatat di log audit."))
+                render_decision_history_grid(_grid_rows)
+                st.download_button(
+                    L("⬇️ Download CSV", "⬇️ Unduh CSV"),
+                    data=decision_log_df().to_csv(index=False).encode("utf-8-sig"),
+                    file_name="somat_decision_history.csv", mime="text/csv", key="dec_csv",
+                )
             else:
-                st.caption(L("✏️ lets you correct a mistake in a record you entered. Every change is written to the audit log.",
-                             "✏️ dipakai untuk mengoreksi kesalahan pada catatan yang Anda input. Setiap perubahan tercatat di log audit."))
-            render_decision_history_grid(_grid_rows)
-            with st.expander(L("📑 Full table view (search, columns, export)", "📑 Tampilan tabel lengkap (cari, kolom, ekspor)")):
-                render_interactive_table(decision_log_df(), key="decision_history", hide_index=True)
-        else:
-            _hist = decision_log_df()
-            if len(_hist):
-                render_interactive_table(_hist, key="decision_history", hide_index=True)
-            else:
-                st.info(L("No operator decisions recorded yet.", "Belum ada keputusan operator yang tercatat."))
+                _hist = decision_log_df()
+                if len(_hist):
+                    render_interactive_table(_hist, key="decision_history", hide_index=True)
+                else:
+                    st.info(L("No operator decisions recorded yet.", "Belum ada keputusan operator yang tercatat."))
 
 
 # ============================================================
