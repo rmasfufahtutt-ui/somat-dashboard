@@ -65,7 +65,7 @@ def _config():
         _get_secret(("SENSOR_SHEET_READ_KEY",), ("sensor_sheet", "read_key"), ("sensor", "read_key"))
         or os.environ.get("SENSOR_SHEET_READ_KEY", "")
     )
-    return url.strip(), key.strip()
+    return url.strip().strip("\"'").strip(), key.strip().strip("\"'").strip()
 
 
 def _result(df, configured, ok, message, sensors=None):
@@ -83,10 +83,12 @@ def _fetch(url, key, hours, limit):
     """Ambil JSON dari Apps Script. Hanya hasil sukses/gagal yang ringkas yang dikembalikan."""
     query = urlencode({"action": "readings", "key": key, "hours": int(hours), "limit": int(limit)})
     sep = "&" if "?" in url else "?"
-    req = Request(f"{url}{sep}{query}", headers={"Accept": "application/json"})
     try:
+        req = Request(f"{url}{sep}{query}", headers={"Accept": "application/json"})
         with urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
+    except ValueError:
+        return {"ok": False, "error": "invalid_url"}
     except HTTPError as exc:
         return {"ok": False, "error": f"http_{exc.code}"}
     except URLError:
@@ -126,6 +128,10 @@ def load_sensor_sheet_data(hours=336, limit=15000):
     if not url or not key:
         return _result(_empty_df(), False, False,
                        "SENSOR_SHEET_URL / SENSOR_SHEET_READ_KEY belum diisi di Secrets.")
+
+    if not url.lower().startswith(("https://", "http://")):
+        return _result(_empty_df(), True, False,
+                       "SENSOR_SHEET_URL harus diawali https:// (cek nilai di Secrets).")
 
     payload = _fetch(url, key, hours, limit)
 
