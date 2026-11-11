@@ -309,7 +309,7 @@ def _secret(section, key, default=""):
 
 DB_URL = str(_secret("neon", "url", "") or os.environ.get("DATABASE_URL", ""))
 SYSTEM_ROLES = ("admin", "operator", "viewer")
-APP_PAGE_KEYS = ("overview", "monitoring", "prediction", "alerts", "operator")
+APP_PAGE_KEYS = ("overview", "monitoring", "prediction", "operator", "alerts")
 DEFAULT_ROLE_PERMISSIONS = {
     "admin": APP_PAGE_KEYS,
     "operator": APP_PAGE_KEYS,
@@ -562,8 +562,8 @@ def page_label(page_key):
         "overview": L("Overview", "Ringkasan"),
         "monitoring": L("Sensor Monitoring", "Monitoring Sensor"),
         "prediction": L("Prediction & Recommendation", "Prediksi & Rekomendasi"),
-        "alerts": L("Alerts", "Peringatan"),
         "operator": L("Operator Decision", "Keputusan Operator"),
+        "alerts": L("Alerts", "Peringatan"),
     }.get(page_key, page_key)
 
 
@@ -869,7 +869,7 @@ def logout():
     st.session_state["_sess_args"] = {"action": "clear", "token": "", "nonce": "clear-" + pysecrets.token_hex(4)}
     st.session_state["user"] = None
     st.session_state["page"] = "login"
-    for _k in ("pending_recommendation", "show_modify", "_last_activity", "_touched"):
+    for _k in ("pending_recommendation", "show_modify", "show_delay", "op_flash", "_last_activity", "_touched"):
         st.session_state.pop(_k, None)
 
 
@@ -1057,10 +1057,106 @@ def save_decision_db(user, decision, rec_mm, op_mm, dur_h, note, feedback, conte
     )
 
 
-def load_decisions_db(limit=200):
-    # Pastikan kolom audit tersedia sebelum membaca riwayat.
+@st.cache_resource(show_spinner=False)
+def _ensure_decision_columns(url):
+    """Pastikan kolom audit ada (sekali per proses). Kegagalan tidak di-cache."""
     db_query("ALTER TABLE decisions ADD COLUMN IF NOT EXISTS edited_by TEXT")
     db_query("ALTER TABLE decisions ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ")
+    return True
+
+
+# ---------- rekomendasi yang menunggu validasi (dibagi antar pengguna lewat database) ----------
+@st.cache_resource(show_spinner=False)
+def _ensure_pending_table(url):
+    db_query("""CREATE TABLE IF NOT EXISTS pending_recommendations (
+        id BIGSERIAL PRIMARY KEY,
+        created_at TIMESTAMPTZ NOT NULL,
+        created_by TEXT NOT NULL,
+        recommended_mm DOUBLE PRECISION NOT NULL,
+        duration_h DOUBLE PRECISION NOT NULL,
+        priority TEXT,
+        feasible BOOLEAN,
+        predicted_mm DOUBLE PRECISION,
+        status TEXT NOT NULL DEFAULT 'PENDING',
+        resolved_by TEXT,
+        resolved_at TIMESTAMPTZ
+    )""")
+    db_query("CREATE INDEX IF NOT EXISTS idx_pending_rec_status ON pending_recommendations(status)")
+    return True
+
+
+def send_pending_recommendation(rec, predicted_mm):
+    """Dikirim dari tab Prediksi. Hanya satu rekomendasi aktif: yang lama diganti (SUPERSEDED)."""
+    who = (current_user() or {}).get("username", "demo")
+    item = {
+        "mm": float(rec["recommended_mm"]), "hours": float(rec["duration_hours"]),
+        "priority": str(rec.get("priority") or "NORMAL"),
+        "feasible": rec.get("feasibility") == "FEASIBLE",
+        "predicted": float(predicted_mm), "by": who,
+        "time": pd.Timestamp.now(tz="Asia/Jakarta").strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if DB_ACTIVE:
+        try:
+            _ensure_pending_table(DB_URL)
+            db_query("UPDATE pending_recommendations SET status='SUPERSEDED', resolved_at=%s WHERE status='PENDING'", (_now(),))
+            db_query(
+                "INSERT INTO pending_recommendations (created_at, created_by, recommended_mm, duration_h, priority, feasible, predicted_mm) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (_now(), who, item["mm"], item["hours"], item["priority"], item["feasible"], item["predicted"]),
+            )
+            audit("recommendation_sent", f"{item['mm']} mm / {item['hours']} h")
+            st.session_state.pop("pending_recommendation", None)
+            return True
+        except Exception:
+            st.session_state["db_error"] = True
+    st.session_state["pending_recommendation"] = item   # cadangan: hanya terlihat di sesi ini
+    return False
+
+
+def get_pending_recommendation():
+    """Rekomendasi yang sedang menunggu validasi (None jika tidak ada)."""
+    if DB_ACTIVE:
+        try:
+            _ensure_pending_table(DB_URL)
+            rows = db_query(
+                "SELECT id, created_at, created_by, recommended_mm, duration_h, priority, feasible "
+                "FROM pending_recommendations WHERE status='PENDING' ORDER BY id DESC LIMIT 1"
+            )
+            if rows:
+                r = rows[0]
+                return {"id": r["id"], "mm": float(r["recommended_mm"]), "hours": float(r["duration_h"]),
+                        "priority": r["priority"] or "NORMAL", "feasible": bool(r["feasible"]),
+                        "by": r["created_by"], "time": fmt_ts(r["created_at"])}
+        except Exception:
+            st.session_state["db_error"] = True
+    p = st.session_state.get("pending_recommendation")
+    if p:
+        return {"id": None, "mm": float(p["mm"]), "hours": float(p["hours"]),
+                "priority": p.get("priority", "NORMAL"), "feasible": bool(p.get("feasible", True)),
+                "by": p.get("by", "-"), "time": p.get("time", "")}
+    return None
+
+
+def claim_pending_recommendation(pending_id):
+    """Menandai rekomendasi sebagai sudah diputuskan. False jika sudah diambil pengguna lain
+    (mencegah dua operator mencatat keputusan untuk rekomendasi yang sama)."""
+    if pending_id is None:
+        return st.session_state.pop("pending_recommendation", None) is not None
+    who = (current_user() or {}).get("username", "demo")
+    try:
+        rows = db_query(
+            "UPDATE pending_recommendations SET status='DONE', resolved_by=%s, resolved_at=%s "
+            "WHERE id=%s AND status='PENDING' RETURNING id",
+            (who, _now(), int(pending_id)),
+        )
+        return bool(rows)
+    except Exception:
+        st.session_state["db_error"] = True
+        return False
+
+
+def load_decisions_db(limit=200):
+    _ensure_decision_columns(DB_URL)
 
     return db_query(
         "SELECT id, ts, username, decision, recommended_mm, operator_mm, "
@@ -1074,9 +1170,11 @@ DECISION_TYPES = ("APPROVE", "MODIFY", "DELAY")
 
 
 def update_decision(decision_id, decision, operator_mm, duration_h, note):
-    """Hanya admin. Mengubah isian keputusan operator; rekomendasi SOMAT & konteks tidak diubah."""
+    """Admin: semua catatan. Operator: hanya catatan yang ia buat sendiri (koreksi salah input).
+    Rekomendasi SOMAT & konteks tidak diubah. Peran diperiksa ulang di sini (server)."""
     refresh_user(force=True)
-    if not is_admin():
+    me = current_user()
+    if not me or not DB_ACTIVE:
         return "forbidden"
     try:
         mm, hours = float(operator_mm), float(duration_h)
@@ -1085,14 +1183,16 @@ def update_decision(decision_id, decision, operator_mm, duration_h, note):
     if decision not in DECISION_TYPES or not (0 <= mm <= 1000) or not (0 <= hours <= 240):
         return "bad_value"
     try:
-        before = db_query("SELECT decision, operator_mm, duration_h, note FROM decisions WHERE id=%s", (int(decision_id),))
+        before = db_query("SELECT username, decision, operator_mm, duration_h, note FROM decisions WHERE id=%s", (int(decision_id),))
         if not before:
             return "not_found"
+        b = before[0]
+        if not (is_admin() or (can_decide() and b["username"] == me["username"])):
+            return "forbidden"
         db_query(
             "UPDATE decisions SET decision=%s, operator_mm=%s, duration_h=%s, note=%s, edited_by=%s, edited_at=%s WHERE id=%s",
-            (decision, mm, hours, str(note or "")[:1000], current_user()["username"], _now(), int(decision_id)),
+            (decision, mm, hours, str(note or "")[:1000], me["username"], _now(), int(decision_id)),
         )
-        b = before[0]
         audit("decision_edit", f"#{decision_id}: {b['decision']}/{b['operator_mm']}mm/{b['duration_h']}h -> {decision}/{mm}mm/{hours}h")
         return None
     except Exception:
@@ -1263,6 +1363,119 @@ def decision_log_df():
         r["status"] = field_status_text(r["status"]) if r.get("status") in ("below", "on", "above") else r.get("status")
         rows.append({cols[k]: r.get(k) for k in cols})
     return pd.DataFrame(rows, columns=list(cols.values()))
+
+
+# ---------------- Riwayat keputusan: baris dengan tombol edit / hapus ----------------
+HIST_PAGE_SIZE = 10
+
+
+def _can_edit_decision(rec):
+    me = current_user()
+    return bool(me) and DB_ACTIVE and (is_admin() or (can_decide() and rec.get("username") == me["username"]))
+
+
+@st.dialog(L("✏️ Edit decision record", "✏️ Ubah catatan keputusan"))
+def _edit_decision_dialog(rec_id):
+    rows = [r for r in load_decisions_db() if r["id"] == rec_id]
+    if not rows:
+        st.error(auth_msg("not_found"))
+        return
+    cur = rows[0]
+    if not _can_edit_decision(cur):
+        st.error(auth_msg("forbidden"))
+        return
+    st.caption(L("Only the decision, amount, duration and note can be edited. The SOMAT recommendation and the "
+                 "simulated field response are not recalculated. Every change is written to the audit log.",
+                 "Yang dapat diubah: keputusan, jumlah, durasi, dan catatan. Rekomendasi SOMAT dan respons lapangan "
+                 "simulasi tidak dihitung ulang. Setiap perubahan tercatat di log audit."))
+    with st.form(f"dec_edit_form_{rec_id}"):
+        _edec = st.selectbox(L("Decision", "Keputusan"), DECISION_TYPES,
+                             index=DECISION_TYPES.index(cur["decision"]) if cur["decision"] in DECISION_TYPES else 0)
+        _emm = st.number_input(L("Operator irrigation (mm)", "Irigasi operator (mm)"), min_value=0.0, max_value=1000.0,
+                               value=float(cur["operator_mm"] or 0.0), step=0.5)
+        _eh = st.number_input(L("Operator duration (h)", "Durasi operator (jam)"), min_value=0.0, max_value=240.0,
+                              value=float(cur["duration_h"] or 0.0), step=0.5)
+        _enote = st.text_area(L("Reason / note (required for MODIFY)", "Alasan / catatan (wajib untuk MODIFY)"), value=cur["note"] or "")
+        _esave = st.form_submit_button(L("Save changes", "Simpan perubahan"), type="primary")
+    if _esave:
+        if _edec == "MODIFY" and not _enote.strip():
+            st.warning(L("A reason is required for a MODIFY decision.", "Alasan wajib diisi untuk keputusan MODIFY."))
+            return
+        _err = update_decision(rec_id, _edec, _emm, _eh, _enote)
+        if _err:
+            st.error(auth_msg(_err))
+        else:
+            st.session_state["dec_flash"] = L(f"Record #{rec_id} updated.", f"Catatan #{rec_id} diperbarui.")
+            st.rerun()
+
+
+@st.dialog(L("🗑️ Delete decision record", "🗑️ Hapus catatan keputusan"))
+def _delete_decision_dialog(rec_id):
+    if not is_admin():
+        st.error(auth_msg("forbidden"))
+        return
+    st.warning(L(f"Record #{rec_id} will be deleted permanently. A summary stays in the audit log.",
+                 f"Catatan #{rec_id} akan dihapus permanen. Ringkasannya tetap tercatat di log audit."))
+    d1, d2 = st.columns(2)
+    if d1.button(L("Delete", "Hapus"), type="primary", key=f"dec_del_go_{rec_id}", width="stretch"):
+        _err = delete_decision(rec_id)
+        if _err:
+            st.error(auth_msg(_err))
+        else:
+            st.session_state["dec_flash"] = L(f"Record #{rec_id} deleted.", f"Catatan #{rec_id} dihapus.")
+            st.rerun()
+    if d2.button(L("Cancel", "Batal"), key=f"dec_del_no_{rec_id}", width="stretch"):
+        st.rerun()
+
+
+def render_decision_history_grid(rows):
+    """Tabel riwayat per baris; kolom terakhir berisi tombol edit (admin & operator) / hapus (admin)."""
+    total = len(rows)
+    pages = max(1, -(-total // HIST_PAGE_SIZE))
+    pg = min(max(int(st.session_state.get("dec_page", 0)), 0), pages - 1)
+    st.session_state["dec_page"] = pg
+    chunk = rows[pg * HIST_PAGE_SIZE:(pg + 1) * HIST_PAGE_SIZE]
+
+    weights = [1.55, 1.0, 1.05, 0.9, 0.9, 0.8, 2.1, 1.5, 0.95]
+    heads = [L("Time (WIB)", "Waktu (WIB)"), L("Operator", "Operator"), L("Decision", "Keputusan"),
+             L("SOMAT (mm)", "SOMAT (mm)"), L("Operator (mm)", "Operator (mm)"), L("Duration (h)", "Durasi (jam)"),
+             L("Reason / note", "Alasan / catatan"), L("Field response (sim.)", "Respons lapangan (sim.)"),
+             L("Actions", "Aksi")]
+    hc = st.columns(weights)
+    for col, h in zip(hc, heads):
+        col.markdown(f"**{h}**")
+
+    for r in chunk:
+        c = st.columns(weights, vertical_alignment="center")
+        c[0].caption(fmt_ts(r["ts"]))
+        c[1].caption(str(r["username"]))
+        c[2].markdown(f"**{r['decision']}**")
+        c[3].caption(f"{float(r['recommended_mm'] or 0):.1f}")
+        c[4].caption(f"{float(r['operator_mm'] or 0):.1f}")
+        c[5].caption(f"{float(r['duration_h'] or 0):.1f}")
+        note_txt = str(r.get("note") or "").replace("\n", " ")
+        if r.get("edited_by"):
+            note_txt += L(f"  _(edited by {r['edited_by']})_", f"  _(diedit oleh {r['edited_by']})_")
+        c[6].markdown(note_txt or "-")
+        stt = field_status_text(r["status"]) if r.get("status") in ("below", "on", "above") else (r.get("status") or "-")
+        c[7].caption(f"{r.get('new_moisture')}% · {stt}" if r.get("new_moisture") is not None else str(stt))
+        with c[8]:
+            a1, a2 = st.columns(2, gap="small")
+            if _can_edit_decision(r):
+                if a1.button("✏️", key=f"dec_edit_{r['id']}", help=L("Edit this record", "Ubah catatan ini")):
+                    _edit_decision_dialog(r["id"])
+            if is_admin():
+                if a2.button("🗑️", key=f"dec_del_{r['id']}", help=L("Delete this record", "Hapus catatan ini")):
+                    _delete_decision_dialog(r["id"])
+
+    n1, n2, n3 = st.columns([1, 2, 1])
+    if n1.button(L("◀ Newer", "◀ Lebih baru"), key="dec_prev", disabled=pg <= 0):
+        st.session_state["dec_page"] = pg - 1
+        st.rerun()
+    n2.caption(L(f"Page {pg + 1} of {pages} · {total} records", f"Halaman {pg + 1} dari {pages} · {total} catatan"))
+    if n3.button(L("Older ▶", "Lebih lama ▶"), key="dec_next", disabled=pg >= pages - 1):
+        st.session_state["dec_page"] = pg + 1
+        st.rerun()
 
 
 # ---------------- Alerts / anomaly (PROTOTYPE) ----------------
@@ -3026,8 +3239,8 @@ _PAGE_NAV = [
     ("overview", "📊", L("Overview", "Ringkasan")),
     ("monitoring", "📡", L("Sensor Monitoring", "Monitoring Sensor")),
     ("prediction", "💧", L("Prediction & Recommendation", "Prediksi & Rekomendasi")),
-    ("alerts", "🚨", L("Alerts", "Peringatan")),
     ("operator", "👷", L("Operator Decision", "Keputusan Operator")),
+    ("alerts", "🚨", L("Alerts", "Peringatan")),
 ]
 nav_items = [(pid, icon, label) for pid, icon, label in _PAGE_NAV if can_access_page(pid)]
 nav_items.append(("account", "👤", L("My Account", "Akun Saya")))
@@ -3478,13 +3691,13 @@ elif page == "prediction":
     st.info(L("🕒 Status: awaiting operator validation. Open the **Operator Decision** menu to approve, modify, or delay.",
               "🕒 Status: menunggu validasi operator. Buka menu **Keputusan Operator** untuk menyetujui, mengubah, atau menunda."))
     if st.button(L("📨 Send to Operator for Validation", "📨 Kirim ke Operator untuk Validasi"), type="primary"):
-        st.session_state["pending_recommendation"] = {
-            "mm": recommendation["recommended_mm"],
-            "hours": recommendation["duration_hours"],
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        st.success(L("Recommendation sent to the operator. Open the **Operator Decision** menu to validate.",
-                     "Rekomendasi dikirim ke operator. Buka menu **Keputusan Operator** untuk memvalidasi."))
+        _shared = send_pending_recommendation(recommendation, prediction["irrigation_mm"])
+        if _shared:
+            st.success(L("Recommendation sent to the operator. It now appears as a card in the **Operator Decision** menu.",
+                         "Rekomendasi dikirim ke operator. Rekomendasi tampil sebagai kartu di menu **Keputusan Operator**."))
+        else:
+            st.warning(L("The database could not be reached. The recommendation is visible only in this session.",
+                         "Database tidak dapat dihubungi. Rekomendasi hanya terlihat di sesi ini."))
     st.subheader(L("❓ Why this recommendation?", "❓ Mengapa rekomendasi ini?"))
     for reason in recommendation["reasons"]:
         st.markdown(f"- {reason}")
@@ -3560,56 +3773,152 @@ elif page == "operator":
         st.warning(L("The database could not be reached; the latest data is shown for this session only.",
                      "Database tidak dapat dihubungi; data terbaru hanya tampil untuk sesi ini."))
 
-    def _record(decision, mm, hours, note_text, flash):
-        """Cek ulang izin (peran bisa berubah saat sesi) lalu catat keputusan."""
+    def _record(decision, mm, hours, note_text, flash, pending):
+        """Cek ulang izin, ambil rekomendasi (hanya satu pengguna yang berhasil), lalu catat keputusan."""
         refresh_user(force=True)
         if not can_decide():
             st.error(auth_msg("forbidden"))
             return
+        if not claim_pending_recommendation(pending["id"]):
+            st.session_state["show_modify"] = False
+            st.session_state["show_delay"] = False
+            st.session_state["op_flash"] = ("warning", L(
+                "This recommendation was already handled or replaced. No decision was recorded.",
+                "Rekomendasi ini sudah diputuskan atau diganti. Tidak ada keputusan yang dicatat."))
+            st.rerun()
         st.session_state["show_modify"] = False
-        log_decision(decision, recommendation, mm, hours, note_text)
-        st.success({
+        st.session_state["show_delay"] = False
+        rec_for_log = dict(recommendation)
+        rec_for_log["recommended_mm"] = pending["mm"]
+        rec_for_log["duration_hours"] = pending["hours"]
+        rec_for_log["priority"] = pending["priority"]
+        log_decision(decision, rec_for_log, mm, hours, note_text)
+        st.session_state["op_flash"] = ("success", {
             "approve": L("✅ Decision recorded: APPROVE", "✅ Keputusan dicatat: APPROVE"),
             "delay": L("⏸️ Decision recorded: DELAY (irrigation postponed)", "⏸️ Keputusan dicatat: DELAY (irigasi ditunda)"),
             "modify": L("✏️ Decision recorded: MODIFY", "✏️ Keputusan dicatat: MODIFY"),
         }.get(flash, str(flash)))
+        st.rerun()
+
+    def _pending_cards(p, editable_inputs=None):
+        """Kartu rekomendasi yang menunggu validasi (gaya sama seperti kartu SOMAT Recommendation)."""
+        prio = p["priority"] if p["priority"] in ("HIGH", "NORMAL", "LOW") else "NORMAL"
+        prio_label = {"HIGH": L("HIGH", "TINGGI"), "NORMAL": "NORMAL", "LOW": L("LOW", "RENDAH")}[prio]
+        feas = p["feasible"]
+        cards = [
+            dict(icon="💧", title=L("Recommended Irrigation", "Irigasi Disarankan"), target=p["mm"], decimals=1, suffix=" mm",
+                 note=L(f"Sent {p['time']} by {p['by']}", f"Dikirim {p['time']} oleh {p['by']}"),
+                 badge_text=L("Awaiting", "Menunggu"), badge_kind="warn", color="orange"),
+            dict(icon="⏱️", title=L("Recommended Duration", "Durasi Disarankan"), target=p["hours"], decimals=1, suffix=L(" h", " jam"),
+                 note=L(f"Area {ASSUMPTIONS['area_ha']} ha", f"Luas {ASSUMPTIONS['area_ha']} ha"),
+                 badge_text=L("Awaiting", "Menunggu"), badge_kind="warn", color="orange"),
+            dict(icon="🚰", title=L("Hydraulic Feasibility", "Kelayakan Hidraulik"),
+                 value_text=L("FEASIBLE", "LAYAK") if feas else L("NOT FEASIBLE", "TIDAK LAYAK"),
+                 note=L("All checks passed", "Semua cek lolos") if feas else L("Some checks failed", "Ada cek yang gagal"),
+                 badge_text=L("Feasible", "Layak") if feas else L("Not feasible", "Tidak layak"),
+                 badge_kind="ok" if feas else "warn", color="green" if feas else "red"),
+            dict(icon="⚑", title=L("Priority", "Prioritas"), value_text=prio_label,
+                 note=L("Based on demand and soil moisture", "Berdasarkan kebutuhan dan kelembapan tanah"),
+                 badge_text=prio_label.capitalize(), badge_kind="warn" if prio == "HIGH" else ("info" if prio == "NORMAL" else "ok"),
+                 color="red" if prio == "HIGH" else ("blue" if prio == "NORMAL" else "green")),
+        ]
+        return cards
 
     if can_decide():
-        if "pending_recommendation" in st.session_state:
-            p = st.session_state["pending_recommendation"]
-            st.warning(L(
-                f"📨 Recommendation awaiting validation: {p['mm']} mm for {p['hours']} hours (sent {p['time']}). Choose APPROVE, MODIFY, or DELAY.",
-                f"📨 Rekomendasi menunggu validasi: {p['mm']} mm selama {p['hours']} jam (dikirim {p['time']}). Pilih APPROVE, MODIFY, atau DELAY.",
-            ))
+        p = get_pending_recommendation()
+        if "op_flash" in st.session_state:
+            _fk, _fm = st.session_state.pop("op_flash")
+            (st.success if _fk == "success" else st.warning)(_fm)
+
+        if p is None:
+            st.session_state["show_modify"] = False
+            st.session_state["show_delay"] = False
+        pid_key = str(p["id"]) if p else "none"
+
+        st.subheader(L("📨 Recommendation awaiting validation", "📨 Rekomendasi menunggu validasi"))
+        cards_slot = st.container()
 
         note = st.text_input(
             L("📝 Operator note (optional for APPROVE and DELAY)", "📝 Catatan operator (opsional untuk APPROVE dan DELAY)"),
             placeholder=L("Example: discharge is sufficient, proceed as recommended", "Contoh: debit cukup, lanjutkan sesuai rekomendasi"),
+            disabled=p is None,
         )
         b1, b2, b3 = st.columns(3)
-        approve = b1.button("APPROVE", type="primary", width="stretch")
-        modify = b2.button("MODIFY", width="stretch")
-        delay = b3.button("DELAY", width="stretch")
+        approve = b1.button("APPROVE", type="primary", width="stretch", disabled=p is None)
+        modify = b2.button("MODIFY", width="stretch", disabled=p is None)
+        delay = b3.button("DELAY", width="stretch", disabled=p is None)
+        if p is None:
+            st.caption(L("The buttons are enabled when a recommendation is sent from **Prediction & Recommendation**.",
+                         "Tombol aktif setelah ada rekomendasi yang dikirim dari **Prediksi & Rekomendasi**."))
 
-        if approve:
-            _record("APPROVE", recommendation["recommended_mm"], recommendation["duration_hours"], note, "approve")
-        if delay:
-            _record("DELAY", 0.0, 0.0, note or L("Postponed by operator", "Ditunda oleh operator"), "delay")
-        if modify:
-            st.session_state["show_modify"] = True
+        if p is not None:
+            if approve:
+                _record("APPROVE", p["mm"], p["hours"], note, "approve", p)
+            if modify:
+                st.session_state["show_modify"] = True
+                st.session_state["show_delay"] = False
+            if delay:
+                st.session_state["show_delay"] = True
+                st.session_state["show_modify"] = False
 
-        if st.session_state["show_modify"]:
-            with st.form("modify_form"):
-                st.subheader(L("✏️ Modify recommendation", "✏️ Ubah rekomendasi"))
-                mod_mm = st.number_input(L("Irrigation amount (mm)", "Jumlah air irigasi (mm)"), min_value=0.0, value=float(recommendation["recommended_mm"]), step=0.5)
-                mod_hours = st.number_input(L("Duration (hours)", "Durasi (jam)"), min_value=0.0, value=float(recommendation["duration_hours"]), step=0.5)
-                mod_reason = st.text_area(L("Reason for change (required)", "Alasan perubahan (wajib diisi)"))
-                submitted = st.form_submit_button(L("Save modified decision", "Simpan keputusan yang diubah"))
-            if submitted:
-                if mod_reason.strip() == "":
-                    st.warning(L("A reason is required before saving a MODIFY decision.", "Alasan wajib diisi sebelum menyimpan keputusan MODIFY."))
+        with cards_slot:
+            if p is None:
+                st.info(L("No recommendation awaiting validation. Send one from **Prediction & Recommendation**.",
+                          "Tidak ada rekomendasi yang menunggu validasi. Kirim dari **Prediksi & Rekomendasi**."))
+            else:
+                _cards = _pending_cards(p)
+                if st.session_state.get("show_modify"):
+                    # MODIFY: dua kartu pertama menjadi kolom isian; alasan perubahan tetap wajib.
+                    with st.form(f"modify_form_{pid_key}"):
+                        c1, c2, c3, c4 = st.columns(4, gap="small")
+                        with c1:
+                            with st.container(border=True):
+                                st.markdown(L("**💧 Irrigation amount (edit)**", "**💧 Jumlah irigasi (ubah)**"))
+                                mod_mm = st.number_input("mm", min_value=0.0, max_value=1000.0, value=float(p["mm"]), step=0.5,
+                                                         label_visibility="collapsed", key=f"mod_mm_{pid_key}")
+                                st.caption(L("mm · SOMAT suggested: ", "mm · saran SOMAT: ") + f"{p['mm']:.1f}")
+                        with c2:
+                            with st.container(border=True):
+                                st.markdown(L("**⏱️ Duration (edit)**", "**⏱️ Durasi (ubah)**"))
+                                mod_hours = st.number_input("h", min_value=0.0, max_value=240.0, value=float(p["hours"]), step=0.5,
+                                                            label_visibility="collapsed", key=f"mod_h_{pid_key}")
+                                st.caption(L("hours · SOMAT suggested: ", "jam · saran SOMAT: ") + f"{p['hours']:.1f}")
+                        with c3:
+                            render_counter_card(**_cards[2])
+                        with c4:
+                            render_counter_card(**_cards[3])
+                        with st.container(border=True):
+                            st.markdown(L("**📝 Reason for change (required)**", "**📝 Alasan perubahan (wajib diisi)**"))
+                            mod_reason = st.text_area("reason", label_visibility="collapsed", key=f"mod_reason_{pid_key}",
+                                                      placeholder=L("Why is the amount or duration changed?", "Mengapa jumlah atau durasi diubah?"))
+                        s1, s2 = st.columns(2)
+                        m_save = s1.form_submit_button(L("Save modified decision", "Simpan keputusan yang diubah"), type="primary", width="stretch")
+                        m_cancel = s2.form_submit_button(L("Cancel", "Batal"), width="stretch")
+                    if m_cancel:
+                        st.session_state["show_modify"] = False
+                        st.rerun()
+                    if m_save:
+                        if mod_reason.strip() == "":
+                            st.warning(L("A reason is required before saving a MODIFY decision.", "Alasan wajib diisi sebelum menyimpan keputusan MODIFY."))
+                        else:
+                            _record("MODIFY", mod_mm, mod_hours, mod_reason, "modify", p)
+                elif st.session_state.get("show_delay"):
+                    render_card_rows(_cards, columns=4)
+                    with st.form(f"delay_form_{pid_key}"):
+                        with st.container(border=True):
+                            st.markdown(L("**⏸️ Delay irrigation, reason**", "**⏸️ Tunda irigasi, alasan**"))
+                            delay_reason = st.text_area("delay reason", label_visibility="collapsed", key=f"delay_reason_{pid_key}",
+                                                        placeholder=L("Why is irrigation postponed? (optional)", "Mengapa irigasi ditunda? (opsional)"))
+                        d1, d2 = st.columns(2)
+                        d_ok = d1.form_submit_button(L("Confirm DELAY", "Konfirmasi DELAY"), type="primary", width="stretch")
+                        d_cancel = d2.form_submit_button(L("Cancel", "Batal"), width="stretch")
+                    if d_cancel:
+                        st.session_state["show_delay"] = False
+                        st.rerun()
+                    if d_ok:
+                        _record("DELAY", 0.0, 0.0, delay_reason.strip() or note or L("Postponed by operator", "Ditunda oleh operator"), "delay", p)
                 else:
-                    _record("MODIFY", mod_mm, mod_hours, mod_reason, "modify")
+                    render_card_rows(_cards, columns=4)
     elif not _u:
         if DB_ACTIVE:
             st.info(L("Please sign in as an operator to record decisions.", "Silakan masuk sebagai operator untuk mencatat keputusan."))
@@ -3645,49 +3954,28 @@ elif page == "operator":
     if _u:
         if "dec_flash" in st.session_state:
             st.success(st.session_state.pop("dec_flash"))
-        _hist = decision_log_df()
-        if len(_hist):
-            render_interactive_table(_hist, key="decision_history", hide_index=True)
+        _grid_rows = []
+        if DB_ACTIVE and (is_admin() or can_decide()):
+            try:
+                _grid_rows = load_decisions_db()
+            except Exception:
+                st.session_state["db_error"] = True
+        if _grid_rows:
+            if is_admin():
+                st.caption(L("✏️ edit and 🗑️ delete are available to administrators. Every change is written to the audit log.",
+                             "✏️ ubah dan 🗑️ hapus tersedia untuk administrator. Setiap perubahan tercatat di log audit."))
+            else:
+                st.caption(L("✏️ lets you correct a mistake in a record you entered. Every change is written to the audit log.",
+                             "✏️ dipakai untuk mengoreksi kesalahan pada catatan yang Anda input. Setiap perubahan tercatat di log audit."))
+            render_decision_history_grid(_grid_rows)
+            with st.expander(L("📑 Full table view (search, columns, export)", "📑 Tampilan tabel lengkap (cari, kolom, ekspor)")):
+                render_interactive_table(decision_log_df(), key="decision_history", hide_index=True)
         else:
-            st.info(L("No operator decisions recorded yet.", "Belum ada keputusan operator yang tercatat."))
-
-        # Hanya admin: ubah / hapus catatan riwayat (server memeriksa peran lagi sebelum menyimpan).
-        if is_admin() and DB_ACTIVE and len(_hist):
-            with st.expander(L("🛠️ Edit or delete a record (admin only)", "🛠️ Ubah atau hapus catatan (khusus admin)")):
-                st.caption(L("Only the decision, amount, duration and note can be edited. The SOMAT recommendation and the "
-                             "simulated field response are not recalculated. Every change is written to the audit log.",
-                             "Yang dapat diubah: keputusan, jumlah, durasi, dan catatan. Rekomendasi SOMAT dan respons lapangan "
-                             "simulasi tidak dihitung ulang. Setiap perubahan tercatat di log audit."))
-                _drows = load_decisions_db()
-                _dopts = {r["id"]: f"#{r['id']} · {fmt_ts(r['ts'])} · {r['username']} · {r['decision']}" for r in _drows}
-                _dsel = st.selectbox(L("Select record", "Pilih catatan"), list(_dopts), format_func=lambda i: _dopts[i], key="dec_sel")
-                _cur = next(r for r in _drows if r["id"] == _dsel)
-                with st.form(f"dec_edit_form_{_dsel}"):
-                    _edec = st.selectbox(L("Decision", "Keputusan"), DECISION_TYPES,
-                                         index=DECISION_TYPES.index(_cur["decision"]) if _cur["decision"] in DECISION_TYPES else 0)
-                    _emm = st.number_input(L("Operator irrigation (mm)", "Irigasi operator (mm)"), min_value=0.0, max_value=1000.0,
-                                           value=float(_cur["operator_mm"] or 0.0), step=0.5)
-                    _eh = st.number_input(L("Operator duration (h)", "Durasi operator (jam)"), min_value=0.0, max_value=240.0,
-                                          value=float(_cur["duration_h"] or 0.0), step=0.5)
-                    _enote = st.text_area(L("Reason / note", "Alasan / catatan"), value=_cur["note"] or "")
-                    _esave = st.form_submit_button(L("Save changes", "Simpan perubahan"), type="primary")
-                if _esave:
-                    _err = update_decision(_dsel, _edec, _emm, _eh, _enote)
-                    if _err:
-                        st.error(auth_msg(_err))
-                    else:
-                        st.session_state["dec_flash"] = L(f"Record #{_dsel} updated.", f"Catatan #{_dsel} diperbarui.")
-                        st.rerun()
-                st.divider()
-                _ok = st.checkbox(L("I understand this permanently deletes the selected record.",
-                                    "Saya mengerti catatan terpilih akan dihapus permanen."), key=f"dec_del_ok_{_dsel}")
-                if st.button(L("🗑️ Delete record", "🗑️ Hapus catatan"), key="dec_del_btn", disabled=not _ok):
-                    _err = delete_decision(_dsel)
-                    if _err:
-                        st.error(auth_msg(_err))
-                    else:
-                        st.session_state["dec_flash"] = L(f"Record #{_dsel} deleted.", f"Catatan #{_dsel} dihapus.")
-                        st.rerun()
+            _hist = decision_log_df()
+            if len(_hist):
+                render_interactive_table(_hist, key="decision_history", hide_index=True)
+            else:
+                st.info(L("No operator decisions recorded yet.", "Belum ada keputusan operator yang tercatat."))
 
 
 # ============================================================
