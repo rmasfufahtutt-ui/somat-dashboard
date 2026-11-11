@@ -1429,18 +1429,38 @@ def _delete_decision_dialog(rec_id):
 
 
 def _history_css():
-    border = THEME["border"]
+    border, panel = THEME["border"], THEME["panel"]
     return f"""<style>
-    .st-key-dec_table{{gap:0 !important;}}
+    .st-key-dec_table{{gap:0 !important;container-type:inline-size;container-name:dectable;}}
     [class*="st-key-dec_row_"]{{border-top:1px solid {border};padding:.5rem 0;gap:0 !important;}}
     .st-key-dec_head{{border-bottom:2px solid {border};padding:.25rem 0 .5rem 0;gap:0 !important;}}
     .dh{{font-size:.74rem;font-weight:800;letter-spacing:.03em;text-transform:uppercase;opacity:.65;
         overflow-wrap:normal;word-break:keep-all;}}
     .dc{{font-size:.88rem;line-height:1.3;overflow-wrap:anywhere;}}
     .dm{{font-size:.74rem;opacity:.62;line-height:1.3;}}
+    .lbl{{display:none;font-size:.68rem;font-weight:800;letter-spacing:.04em;text-transform:uppercase;opacity:.6;margin-bottom:1px;}}
     .chip{{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.72rem;font-weight:800;color:#fff;}}
     .chip.APPROVE{{background:#16884A;}} .chip.MODIFY{{background:#D85A10;}} .chip.DELAY{{background:#256FD1;}}
     [class*="st-key-dec_act_"] button{{padding:.2rem .6rem;min-height:2rem;font-size:.8rem;white-space:nowrap;}}
+
+    /* Lebar tabel < 860px (ponsel / tablet / sidebar terbuka): tiap catatan menjadi kartu */
+    @container dectable (max-width: 860px){{
+      .st-key-dec_head{{display:none !important;}}
+      [class*="st-key-dec_row_"]{{border:1px solid {border};border-radius:12px;background:{panel};
+        padding:.7rem .85rem;margin-bottom:.65rem;}}
+      .lbl{{display:block;}}
+      [class*="st-key-dec_row_"] [data-testid="stHorizontalBlock"]{{flex-wrap:wrap !important;gap:.55rem .9rem !important;}}
+      [class*="st-key-dec_row_"] [data-testid="stColumn"]{{flex:1 1 calc(50% - .9rem) !important;
+        min-width:calc(50% - .9rem) !important;width:auto !important;}}
+      [class*="st-key-dec_row_"] [data-testid="stColumn"]:nth-child(n+6),
+      [class*="st-key-dec_row_"] [data-testid="stColumn"]:nth-child(4){{flex:1 1 100% !important;min-width:100% !important;}}
+      [class*="st-key-dec_row_"] [data-testid="stColumn"]:nth-child(5){{order:4;}}
+      [class*="st-key-dec_row_"] [data-testid="stColumn"]:nth-child(4){{order:5;}}
+      [class*="st-key-dec_row_"] [data-testid="stColumn"]:nth-child(n+6){{order:6;}}
+      [class*="st-key-dec_act_"] [data-testid="stHorizontalBlock"]{{flex-wrap:nowrap !important;gap:.5rem !important;}}
+      [class*="st-key-dec_act_"] [data-testid="stColumn"]{{flex:1 1 0 !important;min-width:0 !important;width:auto !important;}}
+      [class*="st-key-dec_act_"] button{{min-height:2.4rem;}}
+    }}
     </style>"""
 
 
@@ -1470,21 +1490,24 @@ def render_decision_history_grid(rows):
             with st.container(key=f"dec_row_{r['id']}"):
                 c = st.columns(weights, vertical_alignment="center")
                 dec = str(r["decision"])
-                c[0].markdown(f'<div class="dc">{esc(fmt_ts(r["ts"]))}</div>', unsafe_allow_html=True)
-                c[1].markdown(f'<div class="dc">{esc(str(r["username"]))}</div>', unsafe_allow_html=True)
+
+                def cell(i, inner, plain=True):
+                    # label kecil hanya tampil pada tampilan kartu (lebar sempit)
+                    c[i].markdown(f'<div class="dc"><span class="lbl">{esc(heads[i])}</span>{inner}</div>', unsafe_allow_html=True)
+
+                cell(0, esc(fmt_ts(r["ts"])))
+                cell(1, esc(str(r["username"])))
                 chip_cls = dec if dec in DECISION_TYPES else ""
-                c[2].markdown(f'<span class="chip {chip_cls}">{esc(dec)}</span>', unsafe_allow_html=True)
-                c[3].markdown(
-                    f'<div class="dc">{float(r["recommended_mm"] or 0):.1f} → <b>{float(r["operator_mm"] or 0):.1f}</b> mm</div>',
-                    unsafe_allow_html=True)
-                c[4].markdown(f'<div class="dc">{float(r["duration_h"] or 0):.1f} {esc(L("h", "jam"))}</div>', unsafe_allow_html=True)
+                cell(2, f'<span class="chip {chip_cls}">{esc(dec)}</span>')
+                cell(3, f'{float(r["recommended_mm"] or 0):.1f} → <b>{float(r["operator_mm"] or 0):.1f}</b> mm')
+                cell(4, f'{float(r["duration_h"] or 0):.1f} {esc(L("h", "jam"))}')
                 note_txt = esc(str(r.get("note") or "").replace("\n", " ")) or "-"
                 edited = (f'<div class="dm">{esc(L("edited by", "diedit oleh"))} {esc(str(r["edited_by"]))}</div>'
                           if r.get("edited_by") else "")
-                c[5].markdown(f'<div class="dc">{note_txt}</div>{edited}', unsafe_allow_html=True)
+                cell(5, f'{note_txt}{edited}')
                 stt = field_status_text(r["status"]) if r.get("status") in ("below", "on", "above") else (r.get("status") or "-")
                 moist = "" if r.get("new_moisture") is None else f'{float(r["new_moisture"]):.1f}% · '
-                c[6].markdown(f'<div class="dc">{moist}{esc(str(stt))}</div>', unsafe_allow_html=True)
+                cell(6, f'{moist}{esc(str(stt))}')
                 with c[7]:
                     with st.container(key=f"dec_act_{r['id']}"):
                         a1, a2 = st.columns(2, gap="small")
@@ -2729,6 +2752,8 @@ def render_interactive_table(data, *, key="table", hide_index=True, max_height=4
     .chooser label{{display:flex;align-items:center;gap:8px;padding:6px 5px;font-size:12px;cursor:pointer;border-radius:7px}}.chooser label:hover{{background:rgba(47,128,237,.1)}}
     .scrollbtn{{position:absolute;top:50%;transform:translateY(-50%);z-index:18;width:30px;height:54px;border:1px solid var(--border);background:var(--panel2);color:var(--text);border-radius:10px;box-shadow:var(--shadow);cursor:pointer;display:none;place-items:center;font-size:20px}}.frame:hover .scrollbtn.show{{display:grid}}.left{{left:7px}}.right{{right:7px}}
     .empty{{padding:40px;color:var(--muted);text-align:center}}
+    @media (hover:none){{.toolbar{{opacity:1;transform:none;pointer-events:auto}}.scrollbtn.show{{display:grid}}}}
+    @media (max-width:520px){{th,td{{padding:7px 9px;font-size:12px}}.toolbar{{right:6px;top:6px}}}}
     .frame:fullscreen{{width:100vw;height:100vh;border-radius:0}}.frame:fullscreen .viewport{{inset:0}}.frame:fullscreen .toolbar{{opacity:1;pointer-events:auto}}
     </style></head><body><div class='frame' id='frame_{safe_key}'><div class='viewport' id='vp_{safe_key}'><table id='tbl_{safe_key}'><thead></thead><tbody></tbody></table></div>
     <button class='scrollbtn left' title='{T_LEFT}'>‹</button><button class='scrollbtn right' title='{T_RIGHT}'>›</button>
@@ -3827,6 +3852,7 @@ elif page == "operator":
             "delay": L("⏸️ Decision recorded: DELAY (irrigation postponed)", "⏸️ Keputusan dicatat: DELAY (irigasi ditunda)"),
             "modify": L("✏️ Decision recorded: MODIFY", "✏️ Keputusan dicatat: MODIFY"),
         }.get(flash, str(flash)))
+        st.session_state["op_note"] = ""
         st.rerun()
 
     def _pending_cards(p, editable_inputs=None):
@@ -3867,11 +3893,7 @@ elif page == "operator":
         st.subheader(L("📨 Recommendation awaiting validation", "📨 Rekomendasi menunggu validasi"))
         cards_slot = st.container()
 
-        note = st.text_input(
-            L("📝 Operator note (optional for APPROVE and DELAY)", "📝 Catatan operator (opsional untuk APPROVE dan DELAY)"),
-            placeholder=L("Example: discharge is sufficient, proceed as recommended", "Contoh: debit cukup, lanjutkan sesuai rekomendasi"),
-            disabled=p is None,
-        )
+        note_slot = st.container()   # diisi setelah tombol diproses: disembunyikan saat mode MODIFY
         b1, b2, b3 = st.columns(3)
         approve = b1.button("APPROVE", type="primary", width="stretch", disabled=p is None)
         modify = b2.button("MODIFY", width="stretch", disabled=p is None)
@@ -3880,6 +3902,7 @@ elif page == "operator":
             st.caption(L("The buttons are enabled when a recommendation is sent from **Prediction & Recommendation**.",
                          "Tombol aktif setelah ada rekomendasi yang dikirim dari **Prediksi & Rekomendasi**."))
 
+        note = str(st.session_state.get("op_note", "") or "")
         if p is not None:
             if approve:
                 _record("APPROVE", p["mm"], p["hours"], note, "approve", p)
@@ -3887,6 +3910,15 @@ elif page == "operator":
                 _record("DELAY", 0.0, 0.0, note.strip() or L("Postponed by operator", "Ditunda oleh operator"), "delay", p)
             if modify:
                 st.session_state["show_modify"] = True
+
+        with note_slot:
+            if not st.session_state.get("show_modify"):
+                st.text_input(
+                    L("📝 Operator note (optional for APPROVE and DELAY)", "📝 Catatan operator (opsional untuk APPROVE dan DELAY)"),
+                    key="op_note",
+                    placeholder=L("Example: discharge is sufficient, proceed as recommended", "Contoh: debit cukup, lanjutkan sesuai rekomendasi"),
+                    disabled=p is None,
+                )
 
         with cards_slot:
             if p is None:
