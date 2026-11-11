@@ -1428,49 +1428,76 @@ def _delete_decision_dialog(rec_id):
         st.rerun()
 
 
+def _history_css():
+    border = THEME["border"]
+    return f"""<style>
+    .st-key-dec_table{{gap:0 !important;}}
+    [class*="st-key-dec_row_"]{{border-top:1px solid {border};padding:.5rem 0;gap:0 !important;}}
+    .st-key-dec_head{{border-bottom:2px solid {border};padding:.25rem 0 .5rem 0;gap:0 !important;}}
+    .dh{{font-size:.74rem;font-weight:800;letter-spacing:.03em;text-transform:uppercase;opacity:.65;
+        overflow-wrap:normal;word-break:keep-all;}}
+    .dc{{font-size:.88rem;line-height:1.3;overflow-wrap:anywhere;}}
+    .dm{{font-size:.74rem;opacity:.62;line-height:1.3;}}
+    .chip{{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.72rem;font-weight:800;color:#fff;}}
+    .chip.APPROVE{{background:#16884A;}} .chip.MODIFY{{background:#D85A10;}} .chip.DELAY{{background:#256FD1;}}
+    [class*="st-key-dec_act_"] button{{padding:.2rem .6rem;min-height:2rem;font-size:.8rem;white-space:nowrap;}}
+    </style>"""
+
+
 def render_decision_history_grid(rows):
-    """Satu tabel riwayat: semua kolom + kolom terakhir Aksi (Edit untuk admin & operator, Delete untuk admin)."""
+    """Satu tabel riwayat: kolom terakhir Aksi (Edit: admin & operator pemilik catatan, Delete: admin)."""
     total = len(rows)
     pages = max(1, -(-total // HIST_PAGE_SIZE))
     pg = min(max(int(st.session_state.get("dec_page", 0)), 0), pages - 1)
     st.session_state["dec_page"] = pg
     chunk = rows[pg * HIST_PAGE_SIZE:(pg + 1) * HIST_PAGE_SIZE]
+    esc = html.escape
 
-    weights = [1.45, 0.9, 1.0, 0.8, 0.85, 0.75, 1.7, 0.95, 1.2, 0.9, 1.7]
+    st.markdown(_history_css(), unsafe_allow_html=True)
+    weights = [1.5, 1.0, 1.15, 1.45, 0.9, 2.4, 1.7, 2.0]
     heads = [L("Time (WIB)", "Waktu (WIB)"), L("Operator", "Operator"), L("Decision", "Keputusan"),
-             L("SOMAT (mm)", "SOMAT (mm)"), L("Operator (mm)", "Operator (mm)"), L("Duration (h)", "Durasi (jam)"),
-             L("Reason / note", "Alasan / catatan"), L("Moisture after (sim., %)", "Lembap setelah (sim., %)"),
-             L("Field response (sim.)", "Respons lapangan (sim.)"), L("Edited by", "Diedit oleh"),
+             L("SOMAT → Operator (mm)", "SOMAT → Operator (mm)"), L("Duration", "Durasi"),
+             L("Reason / note", "Alasan / catatan"), L("Field (simulated)", "Lapangan (simulasi)"),
              L("Action", "Aksi")]
-    hc = st.columns(weights)
-    for col, h in zip(hc, heads):
-        col.markdown(f"**{h}**")
 
-    for r in chunk:
-        c = st.columns(weights, vertical_alignment="center")
-        c[0].caption(fmt_ts(r["ts"]))
-        c[1].caption(str(r["username"]))
-        c[2].markdown(f"**{r['decision']}**")
-        c[3].caption(f"{float(r['recommended_mm'] or 0):.1f}")
-        c[4].caption(f"{float(r['operator_mm'] or 0):.1f}")
-        c[5].caption(f"{float(r['duration_h'] or 0):.1f}")
-        c[6].markdown(str(r.get("note") or "").replace("\n", " ") or "-")
-        c[7].caption("-" if r.get("new_moisture") is None else f"{float(r['new_moisture']):.1f}")
-        stt = field_status_text(r["status"]) if r.get("status") in ("below", "on", "above") else (r.get("status") or "-")
-        c[8].caption(str(stt))
-        c[9].caption(str(r.get("edited_by") or "-"))
-        with c[10]:
-            a1, a2 = st.columns(2, gap="small")
-            if _can_edit_decision(r):
-                if a1.button(L("Edit", "Edit"), key=f"dec_edit_{r['id']}", width="stretch",
-                             help=L("Edit this record", "Ubah catatan ini")):
-                    _edit_decision_dialog(r["id"])
-            if is_admin():
-                if a2.button(L("Delete", "Delete"), key=f"dec_del_{r['id']}", width="stretch",
-                             help=L("Delete this record", "Hapus catatan ini")):
-                    _delete_decision_dialog(r["id"])
+    with st.container(key="dec_table"):
+        with st.container(key="dec_head"):
+            hc = st.columns(weights, vertical_alignment="center")
+            for col, h in zip(hc, heads):
+                col.markdown(f'<div class="dh">{esc(h)}</div>', unsafe_allow_html=True)
 
-    n1, n2, n3 = st.columns([1, 2, 1])
+        for r in chunk:
+            with st.container(key=f"dec_row_{r['id']}"):
+                c = st.columns(weights, vertical_alignment="center")
+                dec = str(r["decision"])
+                c[0].markdown(f'<div class="dc">{esc(fmt_ts(r["ts"]))}</div>', unsafe_allow_html=True)
+                c[1].markdown(f'<div class="dc">{esc(str(r["username"]))}</div>', unsafe_allow_html=True)
+                chip_cls = dec if dec in DECISION_TYPES else ""
+                c[2].markdown(f'<span class="chip {chip_cls}">{esc(dec)}</span>', unsafe_allow_html=True)
+                c[3].markdown(
+                    f'<div class="dc">{float(r["recommended_mm"] or 0):.1f} → <b>{float(r["operator_mm"] or 0):.1f}</b> mm</div>',
+                    unsafe_allow_html=True)
+                c[4].markdown(f'<div class="dc">{float(r["duration_h"] or 0):.1f} {esc(L("h", "jam"))}</div>', unsafe_allow_html=True)
+                note_txt = esc(str(r.get("note") or "").replace("\n", " ")) or "-"
+                edited = (f'<div class="dm">{esc(L("edited by", "diedit oleh"))} {esc(str(r["edited_by"]))}</div>'
+                          if r.get("edited_by") else "")
+                c[5].markdown(f'<div class="dc">{note_txt}</div>{edited}', unsafe_allow_html=True)
+                stt = field_status_text(r["status"]) if r.get("status") in ("below", "on", "above") else (r.get("status") or "-")
+                moist = "" if r.get("new_moisture") is None else f'{float(r["new_moisture"]):.1f}% · '
+                c[6].markdown(f'<div class="dc">{moist}{esc(str(stt))}</div>', unsafe_allow_html=True)
+                with c[7]:
+                    with st.container(key=f"dec_act_{r['id']}"):
+                        a1, a2 = st.columns(2, gap="small")
+                        if _can_edit_decision(r):
+                            if a1.button(L("Edit", "Edit"), key=f"dec_edit_{r['id']}", width="stretch",
+                                         help=L("Edit this record", "Ubah catatan ini")):
+                                _edit_decision_dialog(r["id"])
+                        if is_admin():
+                            if a2.button(L("Delete", "Delete"), key=f"dec_del_{r['id']}", width="stretch",
+                                         help=L("Delete this record", "Hapus catatan ini")):
+                                _delete_decision_dialog(r["id"])
+
+    n1, n2, n3 = st.columns([1, 2, 1], vertical_alignment="center")
     if n1.button(L("◀ Newer", "◀ Lebih baru"), key="dec_prev", disabled=pg <= 0):
         st.session_state["dec_page"] = pg - 1
         st.rerun()
