@@ -1,0 +1,22 @@
+digraph Framework {
+ graph [rankdir=TB,bgcolor="#FFFFFF",pad=0.35,nodesep=0.36,ranksep=0.52,fontname="DejaVu Sans",label="SOMAT  |  GRAND FRAMEWORK\nRancangan pengembangan • h petak manual 1–2 kali sehari",labelloc=t,fontsize=21,fontcolor="#12352E"];
+ node [shape=box,style="rounded,filled",fillcolor="#EDF5F2",color="#93B8AA",fontname="DejaVu Sans",fontcolor="#153A31",fontsize=12,margin="0.20,0.15"];
+ edge [color="#537D70",arrowsize=0.7,fontname="DejaVu Sans",fontsize=10,fontcolor="#35564B"];
+ data [label="PENGAMATAN DAN PRAKIRAAN\nh manual • kelembapan tanah • muka air saluran\nSuhu/hujan pengamatan • prakiraan BMKG",width=6.7];
+ qc [label="MUTU DATA DAN PROFIL PETAK\nSumber • waktu • satuan • datum • versi parameter\nPisahkan dummy, pengamatan, dan prakiraan",width=6.7];
+ baseline [label="NERACA AIR DAN ATURAN FASE\nET0 → ETc → kehilangan bersih → lintasan h\nPemicu AWD • target pengisian • batas hidraulik",width=6.7];
+ rec [label="REKOMENDASI PER PETAK\nh saat air tiba • jumlah • volume • durasi\nAlasan • keterbatasan • masa berlaku",width=6.7];
+ op [label="KEPUTUSAN OPERATOR\nAPPROVE • MODIFY • DELAY\nMODIFY wajib alasan dan jumlah berubah",width=6.7,fillcolor="#DCECF8",color="#8EADC4"];
+ execution [label="PELAKSANAAN AKTUAL\nWaktu air tiba • awal/akhir pengairan\nDebit/volume terukur • h sesudah pengairan",width=6.7];
+ eval [label="EVALUASI DAN VERSI PENELITIAN\nGalat h • ketepatan ambang • volume aktual • hasil panen\nBekukan metode dan model sebelum uji final",width=6.7];
+ labels [label="LABEL LAPANGAN YANG VALID\nJendela tanpa hujan/irigasi/limpasan\nTidak melintasi h = 0",fillcolor="#FFF3DD",color="#C9AC70"];
+ train [label="AI OFFLINE DAN SHADOW\nRF residual vs baseline\nUji waktu terpisah • tanpa kebocoran",fillcolor="#FFF3DD",color="#C9AC70"];
+ ai [label="RESIDUAL ML TERVERIFIKASI\nM2 mengganti SPconstant\nTidak menjumlahkan keduanya",fillcolor="#FFF3DD",color="#C9AC70"];
+ data -> qc -> baseline -> rec -> op -> execution -> eval;
+ qc -> labels [label="data historis"];
+ labels -> train -> ai;
+ ai -> baseline [label="setelah lolos evaluasi",constraint=false];
+ execution -> labels [label="kejadian aktual",style=dashed,constraint=false];
+ eval -> train [label="versi berikutnya",style=dashed,constraint=false];
+ {rank=same; baseline; ai}
+}

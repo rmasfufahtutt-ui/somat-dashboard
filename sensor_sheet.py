@@ -1,86 +1,46 @@
 """
 sensor_sheet.py - pembaca data sensor SOMAT dari Google Apps Script (Google Sheets).
 
-Dipanggil dari app.py:
-    live_sensor_df, sensor_connection = load_sensor_sheet_data(hours=336, limit=15000)
+Modul ini TIDAK memakai Streamlit sehingga dapat dipanggil dari thread latar (data_hub) dan worker terjadwal.
+Pengambilan data tidak pernah dilakukan dari siklus tampilan; UI hanya membaca snapshot di data_hub.
 
-Mengembalikan (DataFrame, dict koneksi).
+fetch_sensor_data(settings) -> (DataFrame, dict koneksi)
 
-DataFrame kolom : timestamp (WIB, tanpa timezone), sensor_id, sensor_type, location,
-                  value, unit, status, measurement_mode, device_id, sequence
-dict koneksi    : configured (bool), ok (bool), count (int), sensors (list), message (str)
+DataFrame kolom : timestamp (WIB, tanpa timezone), sensor_id, sensor_type, location, value, unit,
+                  status, measurement_mode, device_id, sequence, source_type
+dict koneksi    : configured (bool), ok (bool), count (int), sensors (list), message (str), error (str|None)
 
-Secrets Streamlit yang dibaca (salah satu bentuk):
-    SENSOR_SHEET_URL      = "https://script.google.com/macros/s/.../exec"
-    SENSOR_SHEET_READ_KEY = "<key baca>"
-atau dalam tabel:
-    [sensor_sheet]
-    url = "..."
-    read_key = "..."
-Key tidak pernah ditulis ke pesan error atau log.
+source_type TIDAK diturunkan dari keberhasilan konektor: data yang lewat Google Sheets tetap DUMMY sampai
+perangkat fisik terpasang dan `source_type` diubah di konfigurasi (atau dikirim per baris oleh Apps Script).
+Key baca tidak pernah ditulis ke pesan galat atau log.
 """
+from __future__ import annotations
+
 import json
-import os
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+import numpy as np
 import pandas as pd
-import streamlit as st
+
+from settings import SOURCE_TYPES, Settings
 
 TIMEOUT_SECONDS = 20
-CACHE_TTL_SECONDS = 60
+MAX_FUTURE_MINUTES = 10
 
 COLUMNS = [
     "timestamp", "sensor_id", "sensor_type", "location", "value", "unit",
-    "status", "measurement_mode", "device_id", "sequence",
+    "status", "measurement_mode", "device_id", "sequence", "source_type",
 ]
 
 
-def _empty_df():
+def empty_df() -> pd.DataFrame:
     return pd.DataFrame(columns=COLUMNS)
 
 
-def _get_secret(*paths):
-    """Coba beberapa lokasi secret. paths: ("NAMA",) atau ("tabel", "nama")."""
-    for path in paths:
-        try:
-            node = st.secrets
-            for part in path:
-                node = node[part]
-            value = str(node).strip()
-            if value:
-                return value
-        except Exception:
-            continue
-    return ""
-
-
-def _config():
-    url = (
-        _get_secret(("SENSOR_SHEET_URL",), ("sensor_sheet", "url"), ("sensor", "url"))
-        or os.environ.get("SENSOR_SHEET_URL", "")
-    )
-    key = (
-        _get_secret(("SENSOR_SHEET_READ_KEY",), ("sensor_sheet", "read_key"), ("sensor", "read_key"))
-        or os.environ.get("SENSOR_SHEET_READ_KEY", "")
-    )
-    return url.strip().strip("\"'").strip(), key.strip().strip("\"'").strip()
-
-
-def _result(df, configured, ok, message, sensors=None):
-    return df, {
-        "configured": configured,
-        "ok": ok,
-        "count": int(len(df)),
-        "sensors": sensors or [],
-        "message": message,
-    }
-
-
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
-def _fetch(url, key, hours, limit):
-    """Ambil JSON dari Apps Script. Hanya hasil sukses/gagal yang ringkas yang dikembalikan."""
+def _fetch_json(url: str, key: str, hours: int, limit: int) -> dict:
+    """Ambil JSON dari Apps Script. Hanya hasil sukses/gagal ringkas yang dikembalikan."""
     query = urlencode({"action": "readings", "key": key, "hours": int(hours), "limit": int(limit)})
     sep = "&" if "?" in url else "?"
     try:
@@ -95,7 +55,6 @@ def _fetch(url, key, hours, limit):
         return {"ok": False, "error": "network_error"}
     except Exception:
         return {"ok": False, "error": "request_failed"}
-
     try:
         payload = json.loads(raw)
     except ValueError:
@@ -106,9 +65,11 @@ def _fetch(url, key, hours, limit):
     return payload
 
 
-def _to_frame(readings):
+def to_frame(readings, default_source_type: str = "DUMMY", now=None) -> pd.DataFrame:
+    """Daftar pembacaan -> DataFrame bersih. Duplikat (sensor_id, timestamp) dibuang (nilai terakhir menang);
+    baris dengan waktu di masa depan (> 10 menit) dibuang karena tidak dapat menjadi pengamatan."""
     if not readings:
-        return _empty_df()
+        return empty_df()
     df = pd.DataFrame(readings)
     for col in COLUMNS:
         if col not in df.columns:
@@ -117,29 +78,36 @@ def _to_frame(readings):
     ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
     df["timestamp"] = ts.dt.tz_convert("Asia/Jakarta").dt.tz_localize(None)
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df["value"] = df["value"].where(np.isfinite(df["value"]))     # +-Inf -> NaN (tidak sah)
     df["status"] = df["status"].fillna("").astype(str).str.upper()
+    src = df["source_type"].fillna("").astype(str).str.upper()
+    df["source_type"] = src.where(src.isin(SOURCE_TYPES), default_source_type)
     df = df.dropna(subset=["timestamp"])
     df = df[df["sensor_id"].astype(str).str.strip() != ""]
-    return df[COLUMNS].sort_values("timestamp").reset_index(drop=True)
+    now = now or pd.Timestamp.now(tz="Asia/Jakarta").tz_localize(None)
+    df = df[df["timestamp"] <= now + pd.Timedelta(minutes=MAX_FUTURE_MINUTES)]
+    df = df.sort_values("timestamp").drop_duplicates(["sensor_id", "timestamp"], keep="last")
+    return df[COLUMNS].reset_index(drop=True)
 
 
-def load_sensor_sheet_data(hours=336, limit=15000):
-    url, key = _config()
+def _result(df, configured, ok, message, sensors=None, error=None):
+    return df, {"configured": configured, "ok": ok, "count": int(len(df)), "sensors": sensors or [],
+                "message": message, "error": error}
+
+
+def fetch_sensor_data(settings: Settings):
+    """Ambil dan normalisasi pembacaan sensor. Mengembalikan (DataFrame, dict koneksi)."""
+    url, key = settings.sensor_url, settings.sensor_key
     if not url or not key:
-        return _result(_empty_df(), False, False,
-                       "SENSOR_SHEET_URL / SENSOR_SHEET_READ_KEY belum diisi di Secrets.")
-
+        return _result(empty_df(), False, False, "SENSOR_SHEET_URL / SENSOR_SHEET_READ_KEY belum diisi di Secrets.")
     if not url.lower().startswith(("https://", "http://")):
-        return _result(_empty_df(), True, False,
-                       "SENSOR_SHEET_URL harus diawali https:// (cek nilai di Secrets).")
-
-    payload = _fetch(url, key, hours, limit)
-
+        return _result(empty_df(), True, False, "SENSOR_SHEET_URL harus diawali https:// (cek nilai di Secrets).",
+                       error="invalid_url")
+    payload = _fetch_json(url, key, settings.sensor_hours, settings.sensor_limit)
     if not payload.get("ok"):
         reason = str(payload.get("error") or "unknown_error")
-        return _result(_empty_df(), True, False, f"Gagal membaca Google Sheets: {reason}")
-
-    df = _to_frame(payload.get("readings") or [])
+        return _result(empty_df(), True, False, f"Gagal membaca Google Sheets: {reason}", error=reason)
+    df = to_frame(payload.get("readings") or [], settings.sensor_source_type)
     sensors = payload.get("sensors") or []
     msg = "OK" if len(df) else "Terhubung, belum ada pembacaan sensor."
     return _result(df, True, True, msg, sensors=sensors)

@@ -1,0 +1,12 @@
+﻿Tahap,Pekerjaan,Syarat sebelum berlanjut
+0 Audit dan baseline kode,"Simpan versi arsip, runner tes, daftar gap, pisahkan DEMO",39 tes dapat direproduksi; jalur rekomendasi aktif diketahui; tidak ada klaim field dari dummy
+1 Identitas petak dan h manual,"Migrasi profil dan observations, form h, hak akses, sumber/status parameter",Input dan koreksi berjejak; pembacaan 1–2 kali/hari dapat disimpan; PENDING menghambat hasil yang memerlukannya
+2 Arsip cuaca dan ET0,"Simpan forecast vintages, adapter waktu, cakupan slot, ET0 terpisah pengamatan/prakiraan, sumber suhu",Unit dan tanggal konsisten; hari hilang tidak menggeser horizon; versi konfigurasi dapat ditelusuri
+3 Kalibrasi petak dan hidraulik,"Survei luas/datum, μ, SPconstant, Kc/protokol, L, kurva debit dan distribusi",Parameter punya bukti; rekomendasi parsial ditandai; debit saluran tidak disamakan dengan debit petak
+4 Integrasi neraca air,"Service per petak, observed_at→decision_at→arrival_at, lintas tanggal/fase, volume dan durasi",Uji integrasi pengamatan/DB/UI lulus; seluruh halaman memakai snapshot yang sama; rumus lama hanya DEMO
+5 Keputusan dan pelaksanaan,"Aturan MODIFY lengkap, expiry/idempotensi, log pelaksanaan, pemisahan feedback",Dua operator tidak menduplikasi keputusan; perubahan jumlah dicek ulang; persetujuan tidak mengisi volume aktual
+6 Pilot baseline,"Operasikan manual+sensor setelah terpasang, evaluasi ET0 dan h, mutu dan jadwal baca",Data memadai dan baseline memenuhi batas penerimaan lapangan yang ditetapkan
+7 Dataset dan AI offline,"Label jendela valid, split temporal, RF vs baseline, ANN bila layak",Tidak ada kebocoran; W/fitur/protokol jelas; perbaikan pada data tahan uji dapat dijelaskan
+8 Shadow dan pembekuan,"M2 tanpa kendali keputusan, uji fallback/drift, persetujuan versi penelitian","Target akurasi, keamanan agronomis dan hidraulik terpenuhi; model/ET0/parameter dibekukan"
+9 Pengujian penelitian,"Jalankan protokol petak/perlakuan, simpan actual inlet volume dan hasil panen",Hasil dapat diaudit; tidak ada retraining selama periode yang mensyaratkan pembekuan
+10 Peningkatan berikutnya,Otomasi h jika kebutuhan terbukti; pertimbangkan PM ketika input memadai,Evaluasi manfaat dan biaya; perubahan menghasilkan versi baru yang diuji ulang

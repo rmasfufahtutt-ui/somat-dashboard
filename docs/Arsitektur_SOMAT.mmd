@@ -1,0 +1,17 @@
+flowchart TB
+  M["h manual 1–2 kali sehari"] --> UI["Streamlit"]
+  S["Sensor petak dan saluran"] --> A["Adapter dan validasi"]
+  W["BMKG dan stasiun pengamatan"] --> A
+  UI --> DB["Neon dan arsip versi"]
+  A --> DB
+  DB --> R["Layanan rekomendasi per petak"]
+  R --> E["ET0 pengamatan dan prakiraan"]
+  R --> H["Debit dan batas hidraulik"]
+  E --> P["Neraca air dan aturan fase"]
+  H --> P
+  P --> O["APPROVE / MODIFY / DELAY"]
+  O --> X["Pelaksanaan aktual dan audit"]
+  X --> DB
+  DB --> T["Label valid dan pelatihan offline"]
+  T --> V["Shadow dan model disetujui"]
+  V --> P
