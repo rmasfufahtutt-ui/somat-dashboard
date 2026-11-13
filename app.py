@@ -86,7 +86,11 @@ if st.session_state.get("user"):
 
 COLLAPSED = bool(st.session_state["sb_collapsed"])
 IS_DARK = not bool(st.session_state["light_mode"])
-st.markdown(f"<style>{styles.build_css(IS_DARK, COLLAPSED)}{ui_kit.ui_css(IS_DARK)}</style>", unsafe_allow_html=True)
+# build_css() sudah membungkus dirinya dengan <style>...</style>; bungkus ganda membuat CSS ui_kit bocor jadi teks.
+# Satu blok <style> saja, tanpa baris kosong.
+_css = styles.build_css(IS_DARK, COLLAPSED).replace("<style>", "").replace("</style>", "") + "\n" + ui_kit.ui_css(IS_DARK)
+_css = "\n".join(ln for ln in _css.splitlines() if ln.strip())
+st.markdown(f"<style>\n{_css}\n</style>", unsafe_allow_html=True)
 
 
 def _toggle_theme():
