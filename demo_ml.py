@@ -157,9 +157,10 @@ def _h_end_pred(lab, r_adj):
     return h
 
 
-def train(actor: str | None = None, seed: int = 42) -> dict:
+def train(actor: str | None = None, seed: int = 42, _internal: bool = False) -> dict:
     """Latih dan simpan model demo (hanya admin). -> ringkasan lengkap (termasuk metrik uji M1 vs M2)."""
-    demo_mode.require("admin")
+    if not _internal:
+        demo_mode.require("admin")
     if not HAS_SKLEARN:
         return {"status": "NO_SKLEARN", "message": "scikit-learn tidak tersedia; M2 tidak dapat dilatih."}
     corpus = generate_corpus(seed)

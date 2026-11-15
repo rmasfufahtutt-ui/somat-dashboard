@@ -17,6 +17,7 @@ st.set_page_config(page_title="SOMAT Dashboard", page_icon="💧", layout="wide"
 import auth  # noqa: E402
 import db  # noqa: E402
 import demo_mode  # noqa: E402
+import store  # noqa: E402
 import derive  # noqa: E402
 import repository  # noqa: E402
 import styles  # noqa: E402
@@ -240,6 +241,14 @@ with st.sidebar:
 
 page = st.session_state["page"]
 if demo_mode.is_demo():
+    # Ruang DEMO selalu terisi sendiri (data petak, h, keputusan, irigasi, rekomendasi menunggu, model AI demo).
+    import demo_data
+    _now_t = time.time()
+    if _now_t - st.session_state.get("_demo_ready_at", 0) > 120:
+        _r = demo_data.ensure_ready()
+        st.session_state["_demo_ready_at"] = _now_t
+        if _r["actions"]:
+            store.invalidate()
     st.markdown(f'<div class="demo-banner" role="status" style="background:#7C2D12;color:#FFEDD5;border-left:6px solid #F97316;'
                 f'padding:.55rem .9rem;border-radius:8px;margin-bottom:.5rem;font-weight:600">'
                 f'{html.escape(L(demo_mode.BANNER_EN, demo_mode.BANNER_ID))}</div>', unsafe_allow_html=True)

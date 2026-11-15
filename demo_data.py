@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import threading
 from datetime import date, datetime, timedelta, timezone
 
 import demo_mode
@@ -372,6 +373,10 @@ def clear(now=None) -> dict:
 def refresh_time(now=None) -> dict:
     """Geser seluruh waktu data demo agar 'sekarang' kembali selaras (mis. membuka demo di hari berbeda)."""
     demo_mode.require("admin")
+    return _shift(now)
+
+
+def _shift(now=None, actor="system") -> dict:
     anchor_s = drepo.get_meta("anchor")
     if not anchor_s:
         return {"status": "EMPTY"}
@@ -382,5 +387,50 @@ def refresh_time(now=None) -> dict:
         return {"status": "UP_TO_DATE"}
     drepo.shift_times(delta)
     drepo.set_meta("anchor", new.isoformat())
-    drepo.audit("demo_refresh_time", f"geser {delta}", demo_mode.actor_name())
+    drepo.audit("demo_refresh_time", f"geser {delta}", actor)
     return {"status": "SHIFTED", "delta_hours": delta.total_seconds() / 3600.0}
+
+
+# ---------------------------------------------------------------------------------------------- terisi otomatis
+_READY_LOCK = threading.Lock()
+STALE_ANCHOR_HOURS = 6.0                 # jangkar lebih tua dari ini -> waktu data digeser agar h terakhir tetap "segar"
+PENDING_DEMO_PLOTS = ("DEMO-P01", "DEMO-P03")   # skenario yang langsung menunggu keputusan operator saat demo dibuka
+
+
+def ensure_ready(now=None, train_model=True) -> dict:
+    """Pastikan ruang DEMO selalu siap dipakai tanpa admin mengisi apa pun:
+    1) kosong -> muat dataset awal; 2) jangkar waktu basi -> geser waktu; 3) tidak ada rekomendasi menunggu -> terbitkan
+    untuk skenario IRRIGATE & RAIN_HOLD (pemaksa cuaca bawaan petak); 4) model AI demo belum ada -> latih.
+    Idempoten dan aman dipanggil di setiap render (murah bila sudah siap). Hanya menyentuh repositori DEMO (SQLite)."""
+    done = []
+    with _READY_LOCK, demo_mode.system():
+        if not drepo.is_loaded():
+            _write(now, "autoload")
+            done.append("loaded")
+        else:
+            a = drepo.get_meta("anchor")
+            if a:
+                age_h = ((now or datetime.now(timezone.utc)) - datetime.fromisoformat(a)).total_seconds() / 3600.0
+                if age_h > STALE_ANCHOR_HOURS:
+                    r = _shift(now)
+                    if r.get("status") == "SHIFTED":
+                        done.append("time_shifted")
+        import demo_service as dsvc
+        pending = {r["plot_id"] for r in drepo.list_pending_runs()}
+        for pid in PENDING_DEMO_PLOTS:
+            if pid in pending or drepo.get_plot(pid) is None:
+                continue
+            try:
+                dsvc.publish(pid, "demo_operator", now, default_weather(pid), origin="SEED")
+                done.append("published:" + pid)
+            except Exception:
+                pass
+        if train_model:
+            try:
+                import demo_ml
+                if demo_ml.HAS_SKLEARN and not demo_ml.status()["trained"]:
+                    r = demo_ml.train("system", _internal=True)
+                    done.append("model:" + str(r.get("status")))
+            except Exception:
+                pass
+    return {"status": "READY", "actions": done}

@@ -7,6 +7,8 @@ Prinsip isolasi:
 """
 from __future__ import annotations
 
+import threading
+from contextlib import contextmanager
 from typing import Optional
 
 MODE_DEMO = "DEMO"
@@ -106,8 +108,25 @@ _ROLE_PAGES = {"admin": ("operator", "observations", "execution", "admin"),
                "operator": ("operator", "observations", "execution"), "viewer": ()}
 
 
+_SYS = threading.local()
+
+
+@contextmanager
+def system():
+    """Konteks internal untuk pengisian otomatis ruang DEMO (bukan tindakan pengguna). Hanya berlaku di thread ini dan
+    hanya untuk repositori DEMO; tidak pernah memberi akses ke database operasional."""
+    prev = getattr(_SYS, "on", False)
+    _SYS.on = True
+    try:
+        yield
+    finally:
+        _SYS.on = prev
+
+
 def can(action: str) -> bool:
     """action: operator | observations | execution | admin. Dihitung dari peran pada sesi (atau aktor tes)."""
+    if getattr(_SYS, "on", False):
+        return True
     if _TEST["actor"] is not None:
         return action in _ROLE_PAGES.get(_TEST["actor"][1], ())
     u = user()
