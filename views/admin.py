@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 
 import db
+import demo_mode
 from auth import (APP_PAGE_KEYS, SYSTEM_ROLES, auth_msg, create_role, create_user, current_user, delete_role,
                   get_role_pages, is_admin, list_roles, list_users, page_label, refresh_user, reset_password, role_label,
                   save_role_access, update_user)
@@ -27,14 +28,24 @@ def render(hub=None, settings=None):
         return
     if "adm_flash" in st.session_state:
         st.success(st.session_state.pop("adm_flash"))
-    from views import admin_plots, admin_system
-    tab_users, tab_roles, tab_audit, tab_plots, tab_system = st.tabs([
-        L("Users", "Pengguna"),
-        L("Roles & access", "Role & hak akses"),
-        L("Audit log", "Log audit"),
-        L("Plots & parameters", "Petak & parameter"),
-        L("System", "Sistem"),
-    ])
+    from views import admin_plots, admin_system, demo_panels
+    if demo_mode.is_demo_user():
+        # Sesi demo tanpa database produksi: hanya Demo, Petak & parameter (demo), dan log audit demo.
+        t_demo, t_plots = st.tabs([L("Demo", "Demo"), L("Plots & parameters", "Petak & parameter")])
+        with t_demo:
+            demo_panels.render_admin_demo()
+        with t_plots:
+            admin_plots.render()
+        return
+    _tabs = [L("Users", "Pengguna"), L("Roles & access", "Role & hak akses"), L("Audit log", "Log audit"),
+             L("Plots & parameters", "Petak & parameter"), L("System", "Sistem")]
+    if demo_mode.is_demo():
+        _tabs.append(L("Demo", "Demo"))
+    _tabs_ui = st.tabs(_tabs)
+    tab_users, tab_roles, tab_audit, tab_plots, tab_system = _tabs_ui[:5]
+    if demo_mode.is_demo():
+        with _tabs_ui[5]:
+            demo_panels.render_admin_demo()
 
     with tab_users:
         _users = list_users()
@@ -246,6 +257,9 @@ def render(hub=None, settings=None):
         st.caption(L("Latest 200 events: sign-ins, decisions, user changes, and role-access changes.",
                      "200 kejadian terbaru: login, keputusan, perubahan pengguna, dan perubahan hak akses role."))
         _aud = fetch_audit()
+        if demo_mode.is_demo():
+            st.caption(L("Operational audit log (the demo space has its own log in the Demo tab).",
+                         "Log audit operasional (ruang demo punya log sendiri di tab Demo)."))
         if _aud:
             table(pd.DataFrame([{
                 L("Time (WIB)", "Waktu (WIB)"): fmt_ts(r["ts"]),

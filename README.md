@@ -69,3 +69,6 @@ TEST_DATABASE_URL=postgresql://.../somat_test pytest test_db_integration.py   # 
 - Data sensor sekarang umpan uji (`DUMMY`), bukan perangkat terpasang. Respons lapangan simulasi dari prototipe lama **dihapus** (simulasi tidak boleh tampak sebagai hasil).
 - Thread latar belakang hidup selama proses Streamlit hidup; di Streamlit Community Cloud proses dapat tidur saat tidak ada pengunjung — di situlah `worker.py` terjadwal dibutuhkan.
 - Pemulihan sesi memakai komponen `somat_session/` (localStorage); tidak berubah dari versi lama.
+
+## Mode DEMO PENELITIAN
+Ruang demo terpisah untuk presentasi: lihat `docs/DEMO_PENELITIAN.md` dan `CHANGELOG_DEMO.md`.

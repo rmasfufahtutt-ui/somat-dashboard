@@ -108,7 +108,8 @@ def build_drivers(points: list, latitude: Optional[float], kc_by_phase: dict, pl
 # ----------------------------------------------------------------------------------------------
 def compute(*, plot: dict, profile: Optional[dict], cycle: Optional[dict], h_obs: Optional[dict],
             points: list, decision_at: datetime, max_h_age_hours: float, inputs_dummy: bool = False,
-            forecast_meta: Optional[dict] = None) -> tuple:
+            forecast_meta: Optional[dict] = None, pe_by_date: Optional[dict] = None, model: Optional[str] = None,
+            ml_residual: Optional[float] = None, bias: float = 0.0, rain_label: Optional[str] = None) -> tuple:
     """-> (output, snapshot). `output` hasil recommend_timed + penjelasan; `snapshot` seluruh input yang dipakai."""
     planting = cycle["planting_date"] if cycle else None
     snap = {
@@ -149,12 +150,23 @@ def compute(*, plot: dict, profile: Optional[dict], cycle: Optional[dict], h_obs
         ph = phase_at(t, planting, phase_rows)
         return kc_by_phase.get(ph) if ph else None
 
-    model = "M1" if plot_profile.sp_constant.known else "M0"
+    if pe_by_date:                       # skenario hujan eksplisit (mm/hari efektif per tanggal); default: tanpa hujan
+        drivers.pe_by_date = {d: float(v) for d, v in pe_by_date.items()}
+        snap["pe_by_date"] = {str(d): float(v) for d, v in pe_by_date.items()}
+    model = (model or ("M1" if plot_profile.sp_constant.known else "M0")).upper()
+    if model == "M2":                    # M2 = residual ML + bias; SPconstant TIDAK ditambahkan lagi
+        if ml_residual is None:
+            raise ValueError("residual ML diperlukan untuk M2")
+        drivers.r_adj = pe.r_adj_for_model("M2", None, bias, ml_residual)
+        snap["ml_residual_mm_day"], snap["bias_mm_day"] = float(ml_residual), float(bias)
     out = pe.recommend_timed(
         h_obs_cm=h_obs["value"] if h_obs else None, observed_at=observed_at, decision_at=decision_at,
         drivers=drivers, profile=plot_profile, rule_at=rule_at, phase_breaks=breaks, kc_param_at=kc_param_at,
         model=model, max_h_age_hours=max_h_age_hours, inputs_dummy=inputs_dummy)
     out["et0_by_date"] = {str(k): v for k, v in drivers.et0_by_date.items()}
+    if rain_label and out.get("rain_scenario") == "NO_RAIN_SCENARIO" and pe_by_date:
+        out["rain_scenario"], out["rain_note"] = rain_label, "Hujan efektif per tanggal dari skenario (bukan data BMKG)."
+    out["r_adj_mm_day"] = drivers.r_adj
     out["phase_note"] = f"fase {out.get('phase_decision') or '-'} → {out.get('phase_arrival') or '-'}"
     snap["model"] = model
     return out, snap

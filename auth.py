@@ -21,6 +21,7 @@ import streamlit.components.v1 as components
 from PIL import Image, ImageOps
 
 import db
+import demo_mode
 from db import db_query
 from i18n import L
 from repository import audit as _audit
@@ -121,7 +122,12 @@ def current_user():
 
 
 def audit(action, detail="", username=None):
-    _audit(action, detail, username or (current_user() or {}).get("username", "-"))
+    who = username or (current_user() or {}).get("username", "-")
+    if demo_mode.is_demo():           # peristiwa sesi demo masuk ke jejak audit DEMO, bukan operasional
+        import demo_repository
+        demo_repository.audit(action, detail, who)
+        return
+    _audit(action, detail, who)
 
 
 _ROLE_ACCESS_CACHE = {}
@@ -203,7 +209,7 @@ def can_access_page(page_key, user=None):
     u = user or current_user()
     if not u:
         return False
-    if page_key == "account":
+    if page_key in ("account", "guide"):
         return True
     if page_key == "admin":
         return u.get("role") == "admin"
@@ -211,6 +217,8 @@ def can_access_page(page_key, user=None):
         return False
     if u.get("role") == "admin":
         return True
+    if demo_mode.is_demo_user(u):     # akun demo: tanpa database, izin dari tabel peran demo
+        return page_key in DEFAULT_ROLE_PERMISSIONS.get(u.get("role"), ())   # sama dengan peran bawaan sungguhan
     try:
         return page_key in get_role_pages(u.get("role", ""))
     except Exception:
@@ -347,6 +355,8 @@ def refresh_user(force=False):
     supaya pindah tab tidak menunggu query ke database.
     """
     u = current_user()
+    if u and demo_mode.is_demo_user(u):
+        return u
     if not u or not db.active():
         return u
     now = time.time()
@@ -368,11 +378,15 @@ def refresh_user(force=False):
 
 def is_admin():
     u = current_user()
+    if u and demo_mode.is_demo_user(u):
+        return u.get("role") == "admin"
     return bool(u) and db.active() and u.get("role") == "admin"
 
 
 def can_decide():
     u = current_user()
+    if u and demo_mode.is_demo_user(u):
+        return can_access_page("operator", u)
     return bool(u) and db.active() and can_access_page("operator", u)
 
 
@@ -439,6 +453,9 @@ def start_session(user):
     st.session_state["page"] = "overview"
     st.session_state["_user_checked"] = now
     st.session_state["_last_activity"] = now
+    st.session_state["app_mode"] = demo_mode.default_mode_for_login(user)
+    if demo_mode.is_demo_user(user):
+        return                       # sesi demo tidak disimpan ke database
     try:
         token = create_session_token(user["username"])
         st.session_state["_session_token"] = token
@@ -474,6 +491,17 @@ def sync_browser_session():
         st.session_state["_sess_args"] = {"action": "clear", "token": "", "nonce": "clear-" + pysecrets.token_hex(4)}
 
 
+def demo_login(username):
+    """Masuk ke ruang DEMO tanpa database produksi. Hanya untuk akun demo yang terdaftar (tanpa kata sandi)."""
+    spec = demo_mode.DEMO_USERS.get(username)
+    if not spec:
+        return None
+    user = {"username": username, "display_name": spec["display_name"], "role": spec["role"], "avatar_data": None, "demo": True}
+    start_session(user)
+    audit("login_ok", "akun demo", username=username)
+    return user
+
+
 def logout():
     token = st.session_state.pop("_session_token", None)
     audit("logout")
@@ -485,6 +513,7 @@ def logout():
     st.session_state["_sess_args"] = {"action": "clear", "token": "", "nonce": "clear-" + pysecrets.token_hex(4)}
     st.session_state["user"] = None
     st.session_state["page"] = "login"
+    st.session_state.pop("app_mode", None)
     for _k in ("pending_recommendation", "show_modify", "show_delay", "op_flash", "_last_activity", "_touched"):
         st.session_state.pop(_k, None)
 

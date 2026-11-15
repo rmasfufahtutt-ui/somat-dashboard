@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+import demo_mode
 import store
 from i18n import L
 from legacy_prototype import ASSUMPTIONS
@@ -69,6 +70,10 @@ def render(ctx):
              badge_text="Normal" if normal else L("Attention", "Perhatian"), badge_kind=ok(normal, "ok", "warn"),
              color=ok(normal, "green", "red")),
     ], columns=3)
+
+    if demo_mode.is_demo():
+        from views import demo_panels
+        demo_panels.plots_overview(ctx)
 
     # ---- petak (v2): h terakhir, status rekomendasi ----
     st.subheader(L("Plots (field-observed water depth h)", "Petak (tinggi air h hasil pengamatan lapangan)"))

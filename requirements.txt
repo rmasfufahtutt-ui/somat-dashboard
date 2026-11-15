@@ -4,3 +4,4 @@ numpy==2.5.3
 plotly==7.1.0
 psycopg2-binary>=2.9.10,<3
 Pillow>=10.0.0
+scikit-learn>=1.5

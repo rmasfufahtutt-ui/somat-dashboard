@@ -9,7 +9,7 @@ import streamlit as st
 
 import auth
 import physics_engine as pe
-import repository as repo
+import repo_router as repo
 import store
 from i18n import L
 from ui_kit import fmt_ts, table

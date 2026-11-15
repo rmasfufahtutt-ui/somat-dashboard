@@ -46,6 +46,13 @@ DECISION_ERR = {
     "expired": ("This recommendation has expired — nothing was recorded.", "Rekomendasi kedaluwarsa — tidak ada yang dicatat."),
     "not_operational": ("DEMO / manual-required runs cannot be decided operationally.", "Run DEMO / perlu-manual tidak dapat diputuskan operasional."),
     "inputs_changed": ("A newer h observation exists since this recommendation. Recalculate first.", "Ada pengamatan h yang lebih baru sejak rekomendasi ini. Hitung ulang dulu."),
+    "not_demo": ("This run is not a DEMO run; it cannot be decided in the demo space.", "Run ini bukan run DEMO; tidak dapat diputuskan di ruang demo."),
+    "approve_invalid": ("APPROVE/MODIFY need a computed irrigation amount; this run has none.", "APPROVE/MODIFY butuh jumlah irigasi terhitung; run ini tidak punya."),
+    "amount_unchanged": ("MODIFY must change the amount from the SOMAT recommendation.", "MODIFY harus mengubah jumlah dari rekomendasi SOMAT."),
+    "bad_amount": ("Amount must be between 0 and 1000 mm.", "Jumlah harus antara 0 dan 1000 mm."),
+    "bad_decision": ("Unknown decision type.", "Jenis keputusan tidak dikenal."),
+    "forbidden": ("Your role is not allowed to do this.", "Peran Anda tidak diizinkan melakukan ini."),
+    "not_active": ("This record is no longer active.", "Catatan ini sudah tidak aktif."),
 }
 
 

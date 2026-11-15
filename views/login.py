@@ -12,10 +12,28 @@ from styles import LOGO_SRC, _irrigation_image_b64
 _irr = _irrigation_image_b64()
 IRRIGATION_SRC = f"data:image/jpeg;base64,{_irr}" if _irr else ""
 
+def render_demo_login(key="demo_login"):
+    """Masuk ke ruang DEMO PENELITIAN tanpa database produksi (akun demo bawaan, tanpa kata sandi)."""
+    import demo_mode
+    st.markdown("---")
+    st.markdown("**" + L("Research demo (synthetic data)", "Demo penelitian (data sintetis)") + "**")
+    st.caption(L("For presentation and trials. Isolated from operational data; BMKG stays real.",
+                 "Untuk presentasi dan uji coba. Terpisah dari data operasional; BMKG tetap asli."))
+    roles = [("demo_admin", L("Demo as Admin", "Demo sebagai Admin")),
+             ("demo_operator", L("Demo as Operator", "Demo sebagai Operator")),
+             ("demo_viewer", L("Demo as Viewer", "Demo sebagai Pengamat"))]
+    cols = st.columns(len(roles))
+    for col, (uname, label) in zip(cols, roles):
+        if col.button(label, key=f"{key}_{uname}", use_container_width=True):
+            auth.demo_login(uname)
+            st.rerun()
+
+
 def render_login_form(key="login_form"):
     st.subheader(L("🔐 Sign in", "🔐 Masuk"))
     if not db.active():
         st.error(auth_msg("db"))
+        render_demo_login()
         return
     with st.form(key):
         uname = st.text_input(L("Username", "Nama pengguna"))
@@ -28,6 +46,7 @@ def render_login_form(key="login_form"):
             st.rerun()
         else:
             st.error(auth_msg(err))
+    render_demo_login()
 
 
 def render_restoring_screen():

@@ -11,7 +11,9 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import auth
-import repository as repo
+import demo_mode
+import formstate as fs
+import repo_router as repo
 import store
 from i18n import L
 from ui_kit import apply_plot_theme, fmt_ts, plot, table
@@ -28,6 +30,17 @@ def _validate(value, observed_at):
     return None
 
 
+def _fill_example(pid):
+    """Isi contoh (hanya DEMO): nilai wajar relatif terhadap pengamatan terakhir petak, ditandai sebagai contoh."""
+    last = repo.latest_h(pid)
+    base = float(last["value"]) if last else -8.0
+    now_wib = datetime.now(WIB)
+    st.session_state["obs_h_val"] = round(max(H_MIN, min(H_MAX, base - 2.0)) * 2) / 2.0
+    st.session_state["obs_h_date"] = now_wib.date()
+    st.session_state["obs_h_time"] = time(now_wib.hour, now_wib.minute)
+    st.session_state["obs_h_note"] = L(demo_mode.EXAMPLE_NOTE_EN, demo_mode.EXAMPLE_NOTE_ID)
+
+
 def render(ctx):
     u = auth.current_user()
     st.header(L("🪣 Field Observations (water depth h)", "🪣 Pengamatan Lapangan (tinggi air h)"))
@@ -40,19 +53,35 @@ def render(ctx):
         st.info(L("No plots yet (Admin → Plots & parameters).", "Belum ada petak (Admin → Petak & parameter)."))
         return
     ids = [p["plot_id"] for p in plots]
+    fs.keep("obs_plot", ids[0], ids)
     pid = st.selectbox(L("Plot", "Petak"), ids, format_func=lambda i: next(f"{p['plot_id']} · {p['name']}" for p in plots if p["plot_id"] == i),
                        key="obs_plot")
+    fs.sync("obs_plot")
 
-    with st.form("h_form", clear_on_submit=True):
+    now_wib = datetime.now(WIB)
+    demo = demo_mode.is_demo()
+    fs.keep("obs_h_val", -10.0)
+    fs.keep("obs_h_date", now_wib.date())
+    fs.keep("obs_h_time", time(now_wib.hour, now_wib.minute))
+    fs.keep("obs_h_note", "")
+    fs.keep("obs_h_flag", "OK")
+    if demo:
+        st.info(L("DEMO: observations saved here are synthetic (demo repository) and never reach operational data.",
+                  "DEMO: pengamatan yang disimpan di sini bersifat sintetis (repositori demo) dan tidak pernah masuk ke data operasional."))
+        st.button(L("Fill example", "Isi contoh"), key="obs_fill_example", on_click=_fill_example, args=(pid,),
+                  help=L("Fills a plausible value for this plot; you can still edit it before saving.",
+                         "Mengisi nilai yang wajar untuk petak ini; tetap dapat diubah sebelum disimpan."))
+    # Widget biasa (bukan st.form) agar isian bertahan saat pindah halaman; tombol Simpan tetap satu-satunya penulis.
+    with st.container(key="h_form"):
         c1, c2, c3 = st.columns([1, 1, 1])
-        val = c1.number_input(L("h (cm)", "h (cm)"), min_value=H_MIN - 20, max_value=H_MAX + 20, value=-10.0, step=0.5, format="%.1f")
-        now_wib = datetime.now(WIB)
-        d = c2.date_input(L("Date read", "Tanggal dibaca"), value=now_wib.date(), max_value=now_wib.date())
-        t = c3.time_input(L("Time read (WIB)", "Jam dibaca (WIB)"), value=time(now_wib.hour, now_wib.minute), step=300)
-        flag = st.selectbox(L("Quality", "Kualitas"), ["OK", "UNCERTAIN"], format_func=lambda x: {"OK": L("Normal reading", "Pembacaan normal"),
+        val = c1.number_input(L("h (cm)", "h (cm)"), min_value=H_MIN - 20, max_value=H_MAX + 20, step=0.5, format="%.1f", key="obs_h_val")
+        d = c2.date_input(L("Date read", "Tanggal dibaca"), max_value=now_wib.date(), key="obs_h_date")
+        t = c3.time_input(L("Time read (WIB)", "Jam dibaca (WIB)"), step=300, key="obs_h_time")
+        flag = st.selectbox(L("Quality", "Kualitas"), ["OK", "UNCERTAIN"], key="obs_h_flag", format_func=lambda x: {"OK": L("Normal reading", "Pembacaan normal"),
                                                                                                 "UNCERTAIN": L("Uncertain (e.g. muddy, blocked)", "Diragukan (mis. keruh, tersumbat)")}[x])
-        note = st.text_input(L("Note (optional)", "Catatan (opsional)"), max_chars=200)
-        go_save = st.form_submit_button(L("Save observation", "Simpan pengamatan"), type="primary")
+        note = st.text_input(L("Note (optional)", "Catatan (opsional)"), max_chars=200, key="obs_h_note")
+        go_save = st.button(L("Save observation", "Simpan pengamatan"), type="primary", key="obs_h_save")
+    fs.sync("obs_h_val", "obs_h_date", "obs_h_time", "obs_h_note", "obs_h_flag")
     if go_save:
         obs_at = datetime.combine(d, t, tzinfo=WIB).astimezone(timezone.utc)
         err = _validate(float(val), obs_at)
@@ -66,6 +95,7 @@ def render(ctx):
         else:
             try:
                 repo.add_h_observation(pid, float(val), obs_at, u["username"], note, flag)
+                fs.reset("obs_h_val", "obs_h_date", "obs_h_time", "obs_h_note", "obs_h_flag")      # form kembali ke bawaan setelah tersimpan
                 store.invalidate()
                 st.success(L("Saved. Recommendations use the latest active observation.", "Tersimpan. Rekomendasi memakai pengamatan aktif terbaru."))
                 st.rerun()
@@ -86,7 +116,12 @@ def render(ctx):
         df = pd.DataFrame(rows)
         for c in ("observed_at", "received_at"):
             df[c] = df[c].map(fmt_ts)
-        table(df[["obs_id", "value", "observed_at", "received_at", "recorded_by", "quality_flag", "record_status", "note"]], key=f"obs_tbl_{pid}")
+        cols = ["obs_id", "value", "observed_at", "received_at", "recorded_by", "quality_flag", "record_status", "note"]
+        if demo_mode.is_demo() and "origin" in df:
+            df["asal"] = df["origin"].map({"SEED": "data awal (sintetis)", "USER": "diisi pengguna (demo)",
+                                           "SCENARIO": "skenario (demo)"}).fillna("demo")
+            cols.insert(6, "asal")
+        table(df[cols], key=f"obs_tbl_{pid}")
         _corrections(pid, rows, u)
     else:
         st.info(L("No observations for this plot yet.", "Belum ada pengamatan untuk petak ini."))

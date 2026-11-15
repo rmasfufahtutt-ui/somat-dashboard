@@ -8,8 +8,10 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import auth
+import demo_mode
+import formstate as fs
 import recommendation_service as rsvc
-import repository as repo
+import repo_router as repo
 import store
 import texts
 from i18n import L
@@ -40,8 +42,11 @@ def _trajectory_fig(out):
         t = out.get(key)
         if t is not None:
             fig.add_vline(x=t if not isinstance(t, datetime) else t.isoformat(), line_dash="dot", opacity=.6)
-    fig.update_layout(title=L("Predicted water depth h without irrigation (NO_RAIN scenario)",
-                              "Prediksi tinggi air h tanpa irigasi (skenario tanpa hujan)"),
+    rain = str(out.get("rain_scenario") or "")
+    ttl = (L("Predicted water depth h without irrigation (synthetic rain scenario)", "Prediksi tinggi air h tanpa irigasi (skenario hujan sintetis)")
+           if rain.startswith("SYNTHETIC_RAIN") else
+           L("Predicted water depth h without irrigation (NO_RAIN scenario)", "Prediksi tinggi air h tanpa irigasi (skenario tanpa hujan)"))
+    fig.update_layout(title=ttl,
                       yaxis_title="h (cm)", xaxis_title=None, height=340, margin=dict(l=10, r=10, t=56, b=10))
     return apply_plot_theme(fig)
 
@@ -74,10 +79,23 @@ def render(ctx):
                   "Belum ada petak. Administrator perlu menambah petak, parameter, dan siklus tanam (Admin → Petak & parameter)."))
     else:
         ids = [p["plot_id"] for p in plots]
+        fs.keep("pred_plot", ids[0], ids)
         pid = st.selectbox(L("Plot", "Petak"), ids, format_func=lambda i: next(f"{p['plot_id']} · {p['name']}" for p in plots if p["plot_id"] == i),
                            key="pred_plot")
-        out, snapshot, profile = _preview(pid, snap.version, settings.max_h_age_hours, snap)
-        _recommendation_block(ctx, pid, out, snapshot, profile)
+        fs.sync("pred_plot")
+        if demo_mode.is_demo():
+            from views import demo_panels
+            st.markdown(f"**{L('Research demo', 'Demo penelitian')}** — "
+                        + L("choose the temperature source, rain scenario and model; the engine is the same as operational.",
+                            "pilih sumber suhu, skenario hujan, dan model; mesinnya sama dengan operasional."))
+            res = demo_panels.preview(ctx, pid)
+            demo_panels.source_badges(res)
+            _recommendation_block(ctx, pid, res["out"], res["snapshot"], res["profile"], demo_res=res)
+            demo_panels.explain(res)
+            demo_panels.ai_panel(ctx, pid, res)
+        else:
+            out, snapshot, profile = _preview(pid, snap.version, settings.max_h_age_hours, snap)
+            _recommendation_block(ctx, pid, out, snapshot, profile)
 
     st.divider()
     with st.expander(L("Prototype rule-based logic (DEMO, retained from the earlier dashboard)",
@@ -85,7 +103,7 @@ def render(ctx):
         _legacy_block(d)
 
 
-def _recommendation_block(ctx, pid, out, snapshot, profile):
+def _recommendation_block(ctx, pid, out, snapshot, profile, demo_res=None):
     mode = out.get("run_mode", "MANUAL_REQUIRED")
     banner(f"{chip(mode, texts.RUN_KIND.get(mode, 'info'))} {texts.run_mode_label(mode)} · "
            f"{texts.status_label(out['status'])}", texts.RUN_KIND.get(mode, "info"))
@@ -113,6 +131,8 @@ def _recommendation_block(ctx, pid, out, snapshot, profile):
     if fig is not None:
         plot(fig, key=f"traj_{pid}")
     with st.expander(L("ET0 per date (HS_v1 from forecast temperature)", "ET0 per tanggal (HS_v1 dari suhu prakiraan)")):
+        if demo_res is not None:
+            st.caption(L("DEMO temperature source: ", "Sumber suhu DEMO: ") + str((snapshot.get("weather") or {}).get("label", "-")))
         rows = _et0_table(snapshot)
         table(rows, key=f"et0_{pid}") if rows else st.info(L("No ET0 available (needs plot latitude and BMKG forecast).",
                                                           "ET0 belum tersedia (butuh lintang petak dan prakiraan BMKG)."))
@@ -126,10 +146,17 @@ def _recommendation_block(ctx, pid, out, snapshot, profile):
     u = auth.current_user()
     if auth.can_decide():
         can_pub = out["run_mode"] in ("BASELINE_PROVISIONAL", "BASELINE_VALIDATED", "ML_VALIDATED")
-        if st.button(L("📨 Publish to Operator for decision", "📨 Terbitkan ke Operator untuk keputusan"), type="primary",
+        if demo_res is not None:
+            can_pub = out["status"] in ("OK", "TARGET_NOT_REACHABLE")
+        if st.button(L("📨 Publish to Operator for decision", "📨 Terbitkan ke Operator untuk keputusan")
+                     + (L(" (simulation)", " (simulasi)") if demo_res is not None else ""), type="primary",
                      disabled=not can_pub, key=f"pub_{pid}"):
             try:
-                res = rsvc.run_and_publish(repo, pid, ctx.snap, u["username"], ctx.settings)
+                if demo_res is not None:
+                    from views import demo_panels
+                    res = demo_panels.publish(demo_res, pid, ctx, u["username"])
+                else:
+                    res = rsvc.run_and_publish(repo, pid, ctx.snap, u["username"], ctx.settings)
                 store.invalidate()
                 st.success(L(f"Published as recommendation #{res['rec_id']}. Open **Operator Decision**.",
                              f"Diterbitkan sebagai rekomendasi #{res['rec_id']}. Buka **Keputusan Operator**."))
@@ -137,7 +164,10 @@ def _recommendation_block(ctx, pid, out, snapshot, profile):
                 st.error(auth.auth_msg("db"))
         if not can_pub:
             st.caption(L("Only baseline runs with real parameters can be published for decision (not DEMO / manual-required).",
-                         "Hanya run baseline berparameter nyata yang dapat diterbitkan untuk keputusan (bukan DEMO / perlu-manual)."))
+                         "Hanya run baseline berparameter nyata yang dapat diterbitkan untuk keputusan (bukan DEMO / perlu-manual).")
+                       if demo_res is None else
+                       L("This demo run is manual-required (see reasons): it cannot be published for decision.",
+                         "Run demo ini perlu penanganan manual (lihat alasan): tidak dapat diterbitkan untuk keputusan."))
     else:
         st.caption(L("Your role can view recommendations but not publish them.", "Role Anda dapat melihat rekomendasi tetapi tidak menerbitkannya."))
 

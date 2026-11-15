@@ -16,6 +16,7 @@ st.set_page_config(page_title="SOMAT Dashboard", page_icon="💧", layout="wide"
 
 import auth  # noqa: E402
 import db  # noqa: E402
+import demo_mode  # noqa: E402
 import derive  # noqa: E402
 import repository  # noqa: E402
 import styles  # noqa: E402
@@ -32,7 +33,7 @@ LANG = st.session_state["lang"]
 for k, v in (("page", "login"), ("light_mode", False), ("sb_collapsed", False), ("user", None)):
     st.session_state.setdefault(k, v)
 
-PAGES_OK = auth.APP_PAGE_KEYS + ("account", "admin")
+PAGES_OK = auth.APP_PAGE_KEYS + ("account", "admin", "guide")
 if not st.session_state.get("_prefs_loaded"):
     st.session_state["_prefs_loaded"] = True
     qp = st.query_params
@@ -128,7 +129,8 @@ st.button(f"🌐 {LANG.upper()}", key="lang_btn", on_click=_toggle_lang, help=L(
 from views import login  # noqa: E402
 
 if not db.active():
-    st.session_state["user"] = None
+    if not demo_mode.is_demo_user(st.session_state.get("user")):   # sesi demo tidak butuh database produksi
+        st.session_state["user"] = None
 else:
     auth.refresh_user()
 
@@ -150,7 +152,7 @@ pg = st.session_state.get("page", "overview")
 if pg == "login":
     st.session_state["page"] = st.session_state.pop("_want_page", None) or "overview"
     pg = st.session_state["page"]
-if pg == "account":
+if pg in ("account", "guide"):
     pass
 elif pg == "admin":
     if not auth.is_admin():
@@ -184,6 +186,7 @@ NAV = [("overview", "📊", L("Overview", "Ringkasan")),
        ("execution", "🚿", L("Irrigation Execution", "Pelaksanaan Irigasi")),
        ("alerts", "🚨", L("Alerts", "Peringatan"))]
 nav_items = [(p, i, t) for p, i, t in NAV if auth.can_access_page(p)]
+nav_items.append(("guide", "📘", L("Demo Guide", "Panduan Demo")))
 nav_items.append(("account", "👤", L("My Account", "Akun Saya")))
 if auth.is_admin():
     nav_items.append(("admin", "🛡️", L("Admin", "Administrasi")))
@@ -214,6 +217,16 @@ with st.sidebar:
             st.markdown(f'<div class="side-profile">{avm}<div style="min-width:0;"><div class="side-profile-name">'
                         f'{html.escape(u.get("display_name") or u.get("username", ""))}</div>'
                         f'<div class="side-profile-caption">{L("Signed in", "Sedang masuk")}</div></div></div>', unsafe_allow_html=True)
+        if not COLLAPSED and demo_mode.can_use_ops():
+            _cur = demo_mode.mode()
+            _pick = st.radio(L("Workspace", "Ruang kerja"), [demo_mode.MODE_OPS, demo_mode.MODE_DEMO], key="mode_radio",
+                             index=0 if _cur == demo_mode.MODE_OPS else 1, horizontal=True,
+                             format_func=lambda m: L("Operational", "Operasional") if m == demo_mode.MODE_OPS else L("Research demo", "Demo penelitian"))
+            if _pick != _cur:
+                demo_mode.set_mode(_pick)
+                for _k in ("pending_recommendation", "show_modify", "show_delay", "op_flash"):
+                    st.session_state.pop(_k, None)
+                st.rerun()
         st.button("🚪" if COLLAPSED else "🚪  " + L("Sign out", "Keluar"), key="nav_logout", width="stretch", on_click=auth.logout,
                   help=L("Sign out", "Keluar") if COLLAPSED else None)
     if not COLLAPSED:
@@ -226,6 +239,10 @@ with st.sidebar:
                     unsafe_allow_html=True)
 
 page = st.session_state["page"]
+if demo_mode.is_demo():
+    st.markdown(f'<div class="demo-banner" role="status" style="background:#7C2D12;color:#FFEDD5;border-left:6px solid #F97316;'
+                f'padding:.55rem .9rem;border-radius:8px;margin-bottom:.5rem;font-weight:600">'
+                f'{html.escape(L(demo_mode.BANNER_EN, demo_mode.BANNER_ID))}</div>', unsafe_allow_html=True)
 st.markdown(f'<div class="somat-header"><img src="{styles.LOGO_SRC}" alt="Logo SOMAT"><div>'
             f'<h1>SOMAT — Smart Adaptive Irrigation Management System</h1>'
             f'<p>{L("Decision-support for observation, water-balance prediction, operator decisions and evaluation.", "Pendukung keputusan untuk observasi, prediksi neraca air, keputusan operator, dan evaluasi.")}</p></div></div>',
@@ -253,6 +270,9 @@ elif page == "observations":
 elif page == "execution":
     from views import execution
     execution.render(CTX)
+elif page == "guide":
+    from views import guide
+    guide.render(CTX)
 elif page == "account":
     from views import account
     account.render()

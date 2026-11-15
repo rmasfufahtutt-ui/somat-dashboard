@@ -14,9 +14,10 @@ import uuid
 import streamlit as st
 
 import auth
+import demo_mode
 import physics_engine as pe
 import recommendation_service as rsvc
-import repository as repo
+import repo_router as repo
 import store
 import texts
 from i18n import L
@@ -60,9 +61,10 @@ def _submit(run, decision, mm, hours, note, verified=False):
     _clear_idem(run["rec_id"])
     st.session_state.pop("op_modify", None)
     store.invalidate()
-    msg = {"APPROVE": L("✅ Decision recorded: APPROVE", "✅ Keputusan dicatat: APPROVE"),
-           "DELAY": L("⏸️ Decision recorded: DELAY", "⏸️ Keputusan dicatat: DELAY"),
-           "MODIFY": L("✏️ Decision recorded: MODIFY", "✏️ Keputusan dicatat: MODIFY")}[decision]
+    sim = L(" [SIMULATION]", " [SIMULASI]") if demo_mode.is_demo() else ""
+    msg = {"APPROVE": L("✅ Decision recorded: APPROVE", "✅ Keputusan dicatat: APPROVE") + sim,
+           "DELAY": L("⏸️ Decision recorded: DELAY", "⏸️ Keputusan dicatat: DELAY") + sim,
+           "MODIFY": L("✏️ Decision recorded: MODIFY", "✏️ Keputusan dicatat: MODIFY") + sim}[decision]
     st.session_state["op_flash"] = ("success", msg + (L(" (already recorded earlier)", " (sudah tercatat sebelumnya)") if dup else "")
                                     + L(" — record the actual irrigation in **Irrigation Execution**.",
                                         " — catat irigasi aktual di **Pelaksanaan Irigasi**."))
@@ -101,11 +103,16 @@ def _run_card(ctx, run):
     mode = run["run_mode"]
     rid = run["rec_id"]
     st.markdown(f"##### {run['plot_id']} · #{rid} "
-                + chip(mode, texts.RUN_KIND.get(mode, "info")) + " " + chip(texts.status_label(run["status_code"]), "info"),
+                + chip(mode, texts.RUN_KIND.get(mode, "info")) + " " + chip(texts.status_label(run["status_code"]), "info")
+                + (" " + chip(L("SIMULATION", "SIMULASI"), "warn") if demo_mode.is_demo() else ""),
                 unsafe_allow_html=True)
     modifying = st.session_state.get("op_modify") == rid
     can_apply = bool(out.get("irrigate")) and out.get("total_mm") is not None
     operational = mode in ("BASELINE_PROVISIONAL", "BASELINE_VALIDATED", "ML_VALIDATED")
+    if demo_mode.is_demo():
+        # Ruang DEMO: run 'DEMO' dapat diputuskan (SIMULASI) bila mesin menghasilkan angka (OK / TARGET_NOT_REACHABLE);
+        # run MANUAL_REQUIRED (pengamatan usang, parameter kurang, dst.) tetap tidak dapat disetujui.
+        operational = mode == "DEMO" and run.get("status_code") in ("OK", "TARGET_NOT_REACHABLE")
 
     if modifying and operational and can_apply:
         _modify_inline(run, out)       # kartu jumlah/durasi diganti isian; catatan operator disembunyikan
@@ -118,7 +125,9 @@ def _run_card(ctx, run):
         st.markdown(f"- {r}")
 
     if not operational:
-        st.warning(texts.decision_error("not_operational"))
+        st.warning(texts.decision_error("not_operational") if not demo_mode.is_demo() else
+                   L("This demo run needs manual handling (see reasons above): it cannot be approved or modified. Add a fresh observation or fix the parameter, then publish again.",
+                     "Run demo ini butuh penanganan manual (lihat alasan di atas): tidak dapat disetujui atau diubah. Tambahkan pengamatan baru atau lengkapi parameter, lalu terbitkan ulang."))
         _disabled_buttons(f"dis_{rid}", "")
         return
 
@@ -311,7 +320,8 @@ def _history_grid(rows):
                 cell(1, esc(str(r.get("plot_id") or "-")))
                 cell(2, esc(str(r["username"])))
                 cell(3, f'<span class="dh-chip {dec if dec in DECISIONS else ""}">{esc(dec)}</span>'
-                        + ("" if status == "ACTIVE" else f'<span class="dh-st">{esc(status)}</span>'))
+                        + ("" if status == "ACTIVE" else f'<span class="dh-st">{esc(status)}</span>')
+                        + (f'<span class="dh-st">{esc(L("SIMULATION", "SIMULASI"))}</span>' if r.get("source") == "DEMO" else ""))
                 cell(4, f'{float(r["recommended_mm"] or 0):.1f} → <b>{float(r["operator_mm"] or 0):.1f}</b> mm')
                 cell(5, f'{float(r["duration_h"] or 0):.1f} {esc(L("h", "jam"))}')
                 note_txt = esc(str(r.get("note") or "").replace("\n", " ")) or "-"
