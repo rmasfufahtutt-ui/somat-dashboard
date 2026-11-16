@@ -102,6 +102,8 @@ def source_badges(res: dict):
                           "ok" if ok else "bad"))
         if ok and meta.get("fetched_at"):
             parts.append(chip(L("fetched ", "diambil ") + fmt_ts(meta["fetched_at"]), "info"))
+        parts.append(chip(L("BMKG reference: village Panongan (ADM4); demo plot coordinates are illustrative",
+                            "Acuan BMKG: Desa Panongan (ADM4); koordinat petak demo bersifat ilustratif"), "warn"))
     else:
         parts.append(chip(L("Temperature: SYNTHETIC (scenario)", "Suhu: SINTETIS (skenario)"), "warn"))
     rk = w["rain"]

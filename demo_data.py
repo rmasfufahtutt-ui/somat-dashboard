@@ -25,7 +25,7 @@ import recommendation_service as rs
 from repository import inputs_hash
 
 TZ = rs.TZ
-VERSION = "demo-data-1"
+VERSION = "demo-data-2"
 HIST_DAYS = 35                       # >= 30 hari riwayat
 HIST_TRIGGERS = (-14.0, -15.5, -17.0, -12.5)   # variasi ambang irigasi riwayat (operator kadang terlambat); urutan tetap
 HIST_TRIGGER = HIST_TRIGGERS[0]                 # ambang irigasi pada riwayat sintetis (cm), sedikit di atas ambang protokol -15
@@ -47,17 +47,17 @@ SCENARIOS = {
 }
 
 PLOT_SPECS = [
-    dict(plot_id="DEMO-P01", name="Petak Demo 1 — Perlu irigasi", scenario="IRRIGATE", area=0.8, das=36, lat=-7.2501, lon=112.7502,
+    dict(plot_id="DEMO-P01", name="Petak Demo 1 — Perlu irigasi", scenario="IRRIGATE", area=0.8, das=36, lat=-6.6501, lon=108.2802,
          age_h=2.0, profile="NORMAL", rain="NONE", ideal_h=-16.0, q=0.015),
-    dict(plot_id="DEMO-P02", name="Petak Demo 2 — Aman", scenario="SAFE", area=1.0, das=34, lat=-7.2511, lon=112.7512,
+    dict(plot_id="DEMO-P02", name="Petak Demo 2 — Aman", scenario="SAFE", area=1.0, das=34, lat=-6.6511, lon=108.2812,
          age_h=2.0, profile="COOL", rain="NONE", ideal_h=-2.0, q=0.015),
-    dict(plot_id="DEMO-P03", name="Petak Demo 3 — Hujan menahan irigasi", scenario="RAIN_HOLD", area=0.6, das=38, lat=-7.2521, lon=112.7522,
+    dict(plot_id="DEMO-P03", name="Petak Demo 3 — Hujan menahan irigasi", scenario="RAIN_HOLD", area=0.6, das=38, lat=-6.6521, lon=108.2822,
          age_h=2.0, profile="NORMAL", rain="TODAY_HEAVY", ideal_h=-16.0, q=0.015),
-    dict(plot_id="DEMO-P04", name="Petak Demo 4 — Pengamatan usang", scenario="STALE", area=0.9, das=40, lat=-7.2531, lon=112.7532,
+    dict(plot_id="DEMO-P04", name="Petak Demo 4 — Pengamatan usang", scenario="STALE", area=0.9, das=40, lat=-6.6531, lon=108.2832,
          age_h=40.0, profile="NORMAL", rain="NONE", ideal_h=-8.0, q=0.015),
-    dict(plot_id="DEMO-P05", name="Petak Demo 5 — Parameter belum lengkap", scenario="MISSING_PARAM", area=0.7, das=35, lat=-7.2541, lon=112.7542,
+    dict(plot_id="DEMO-P05", name="Petak Demo 5 — Parameter belum lengkap", scenario="MISSING_PARAM", area=0.7, das=35, lat=-6.6541, lon=108.2842,
          age_h=2.0, profile="HOT", rain="NONE", ideal_h=-12.0, q=0.015, pending=("mu_fill",)),
-    dict(plot_id="DEMO-P06", name="Petak Demo 6 — Debit tidak cukup", scenario="NOT_REACHABLE", area=0.8, das=42, lat=-7.2551, lon=112.7552,
+    dict(plot_id="DEMO-P06", name="Petak Demo 6 — Debit tidak cukup", scenario="NOT_REACHABLE", area=0.8, das=42, lat=-6.6551, lon=108.2852,
          age_h=2.0, profile="NORMAL", rain="NONE", ideal_h=-16.0, q=0.0003),
 ]
 SPEC_BY_ID = {s["plot_id"]: s for s in PLOT_SPECS}
@@ -246,7 +246,7 @@ def build_rows(anchor: datetime, dataset_id: str) -> dict:
         rows["plots"].append(dict(plot_id=pid, name=spec["name"], latitude=spec["lat"], longitude=spec["lon"], elevation_m=10.0,
                                   datum="SINTETIS", pipe_count=1, pipe_location="sintetis", soil_sensor_id=f"SIM-{pid}-SOIL",
                                   canal_sensor_id="SIM-CANAL-1", rain_source_id="SIM-RAIN-1", temp_source_id="SIM-TEMP-1",
-                                  coordinate_source="SINTETIS (demo) — bukan lokasi lapangan", active=1, created_at=anchor,
+                                  coordinate_source="ILUSTRATIF (demo) — sekitar wilayah studi Jatitujuh, Majalengka; BUKAN koordinat petak penelitian", active=1, created_at=anchor,
                                   updated_at=anchor, dataset_id=dataset_id, scenario=spec["scenario"],
                                   note=SCENARIOS[spec["scenario"]]))
         rows["plot_profile_versions"].append(dict(profile_id=idx, plot_id=pid, version=1, effective_from=anchor - timedelta(days=HIST_DAYS + 5),
