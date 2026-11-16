@@ -24,13 +24,54 @@ def _dark() -> bool:
     return not bool(st.session_state.get("light_mode", False))
 
 
-def _wrap(body: str, css: str, dark: bool) -> str:
+def _viewer(body: str, css: str, dark: bool, nat_w: int, mode: str = "contain", hint: str = "") -> str:
+    """Pemirsa diagram: roda mouse / tombol +/− untuk zoom, seret dengan kursor tangan untuk menggeser, dua jari untuk cubit.
+    Konten vektor (tetap tajam saat diperbesar); tombol ⟲ menyesuaikan ulang ke ukuran bingkai."""
+    c = PAL[dark]
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-html,body{{margin:0;padding:0;background:transparent;color:{PAL[dark]['text']};font-family:"Source Sans Pro","Segoe UI",Arial,sans-serif}}
+html,body{{margin:0;height:100%;background:transparent;color:{c['text']};font-family:"Source Sans Pro","Segoe UI",Arial,sans-serif;overflow:hidden}}
+#vp{{position:relative;height:100vh;box-sizing:border-box;overflow:hidden;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;
+  border:1px solid {c['line']};border-radius:12px}}
+#vp.drag{{cursor:grabbing}}
+#stage{{position:absolute;left:0;top:0;width:{nat_w}px;transform-origin:0 0;will-change:transform}}
+#tools{{position:absolute;right:10px;top:10px;display:flex;gap:6px;align-items:center;z-index:5}}
+#tools button{{width:32px;height:32px;border-radius:8px;border:1px solid {c['line']};background:{c['card']};color:{c['text']};font-size:17px;line-height:1;cursor:pointer}}
+#tools button:hover{{border-color:{c['blue']}}}
+#zl{{font-size:12px;min-width:44px;text-align:center;color:{c['mute']}}}
+#hint{{position:absolute;left:12px;bottom:8px;font-size:12px;color:{c['mute']};z-index:5;pointer-events:none}}
 {css}
 @media (prefers-reduced-motion: reduce){{*{{animation:none !important}} animateMotion{{display:none}}}}
-</style></head><body>{body}</body></html>"""
+</style></head><body>
+<div id="vp"><div id="tools"><button id="zo" title="Zoom out" aria-label="Zoom out">&minus;</button><span id="zl">100%</span>
+<button id="zi" title="Zoom in" aria-label="Zoom in">+</button><button id="zf" title="Fit" aria-label="Fit">&#x27F2;</button></div>
+<div id="stage">{body}</div><div id="hint">{hint}</div></div>
+<script>
+(function(){{
+ var vp=document.getElementById('vp'),st=document.getElementById('stage'),zl=document.getElementById('zl');
+ var k=1,x=0,y=0,KMIN=0.25,KMAX=6,touched=false,MODE='{mode}';
+ function W(){{return st.offsetWidth}} function H(){{return st.offsetHeight}}
+ function apply(){{st.style.transform='translate('+x+'px,'+y+'px) scale('+k+')';zl.textContent=Math.round(k*100)+'%'}}
+ function fit(){{var vw=vp.clientWidth,vh=vp.clientHeight,kk=MODE==='width'?Math.min(vw/W(),1.3):Math.min(vw/W(),vh/H());
+   k=Math.max(KMIN,Math.min(KMAX,kk));x=(vw-W()*k)/2;y=MODE==='width'?8:(vh-H()*k)/2;apply()}}
+ function zoomAt(f,px,py){{var nk=Math.max(KMIN,Math.min(KMAX,k*f));if(nk===k)return;x=px-(px-x)*(nk/k);y=py-(py-y)*(nk/k);k=nk;touched=true;apply()}}
+ function rect(){{return vp.getBoundingClientRect()}}
+ vp.addEventListener('wheel',function(e){{e.preventDefault();var r=rect();zoomAt(Math.exp(-e.deltaY*0.0016),e.clientX-r.left,e.clientY-r.top)}},{{passive:false}});
+ var P={{}},last=null;
+ vp.addEventListener('pointerdown',function(e){{if(e.target.closest('#tools'))return;vp.setPointerCapture(e.pointerId);P[e.pointerId]={{x:e.clientX,y:e.clientY}};vp.classList.add('drag');last=null}});
+ vp.addEventListener('pointermove',function(e){{var p=P[e.pointerId];if(!p)return;var ids=Object.keys(P);
+   if(ids.length===2){{var a=P[ids[0]],b=P[ids[1]];var d0=Math.hypot(a.x-b.x,a.y-b.y);p.x=e.clientX;p.y=e.clientY;
+     var d1=Math.hypot(a.x-b.x,a.y-b.y);var r=rect();if(d0>0)zoomAt(d1/d0,(a.x+b.x)/2-r.left,(a.y+b.y)/2-r.top);return}}
+   x+=e.clientX-p.x;y+=e.clientY-p.y;p.x=e.clientX;p.y=e.clientY;touched=true;apply()}});
+ function up(e){{delete P[e.pointerId];if(!Object.keys(P).length)vp.classList.remove('drag')}}
+ vp.addEventListener('pointerup',up);vp.addEventListener('pointercancel',up);
+ vp.addEventListener('dblclick',function(e){{if(e.target.closest('#tools'))return;touched=false;fit()}});
+ function btn(id,f){{document.getElementById(id).addEventListener('click',function(){{var r=rect();zoomAt(f,r.width/2,r.height/2)}})}}
+ btn('zi',1.25);btn('zo',0.8);document.getElementById('zf').addEventListener('click',function(){{touched=false;fit()}});
+ window.addEventListener('resize',function(){{if(!touched)fit()}});
+ fit();setTimeout(function(){{if(!touched)fit()}},120);
+}})();
+</script></body></html>"""
 
 
 # ----------------------------------------------------------------------------------------------- diagram arsitektur (SVG)
@@ -51,7 +92,7 @@ def architecture_html(dark: bool, lang: str) -> str:
     markers = "".join(f'<marker id="a-{col[1:]}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
                       f'<path d="M0,0 L10,5 L0,10 z" fill="{col}"/></marker>' for col in (c["blue"], c["green"], c["orange"], c["violet"]))
     svg = f"""
-<svg viewBox="0 0 960 540" width="100%" role="img" aria-label="{T('SOMAT architecture','Arsitektur SOMAT')}">
+<svg viewBox="0 0 960 540" width="960" height="540" role="img" aria-label="{T('SOMAT architecture','Arsitektur SOMAT')}">
 <defs>{markers}</defs>
 <rect x="686" y="10" width="270" height="214" rx="16" fill="none" stroke="{c['green']}" stroke-width="1.4" stroke-dasharray="6 5"/>
 <text x="702" y="32" class="cl" fill="{c['green']}">{T('OPERATIONAL','OPERASIONAL')}</text>
@@ -87,11 +128,10 @@ def architecture_html(dark: bool, lang: str) -> str:
 .flow{{fill:none;stroke-width:2;stroke-dasharray:6 7;animation:dash 1.2s linear infinite;opacity:.95}}
 @keyframes dash{{to{{stroke-dashoffset:-26}}}}
 .node{{filter:drop-shadow(0 2px 6px rgba(0,0,0,.18))}}
-svg{{display:block;max-width:100%;height:auto}}
+svg{{display:block}}
 """
-    note = T("Both workspaces use the same engine; only the inputs and the storage differ. The demo never writes to the operational database.",
-             "Kedua ruang kerja memakai mesin yang sama; hanya masukan dan penyimpanan yang berbeda. Demo tidak pernah menulis ke database operasional.")
-    return _wrap(svg + f'<p style="font-size:12.5px;color:{c["mute"]};margin:.4rem .2rem 0">{note}</p>', css, dark)
+    hint = T("Scroll to zoom · drag to pan · double-click to fit", "Gulir untuk zoom · seret untuk menggeser · klik dua kali untuk fit")
+    return _viewer(svg, css, dark, 960, "contain", hint)
 
 
 # ----------------------------------------------------------------------------------------------- alur pelaksanaan (timeline beranimasi)
@@ -122,8 +162,8 @@ def flow_html(dark: bool, lang: str) -> str:
         f'<li style="--d:{k * 0.45}s"><span class="dot"><b>{k + 1}</b></span><div class="card"><div class="h">{ic} {ttl[i]}</div>'
         f'<div class="p">{txt[i]}</div></div></li>' for k, (ic, ttl, txt) in enumerate(STEPS))
     css = f"""
-ol{{list-style:none;margin:0;padding:6px 0 6px 0;position:relative}}
-ol::before{{content:"";position:absolute;left:19px;top:10px;bottom:10px;width:3px;border-radius:3px;
+ol{{list-style:none;margin:0;padding:44px 16px 36px 16px;position:relative;box-sizing:border-box;width:760px}}
+ol::before{{content:"";position:absolute;left:35px;top:50px;bottom:48px;width:3px;border-radius:3px;
   background:repeating-linear-gradient({c['blue']} 0 10px, transparent 10px 20px);background-size:3px 20px;animation:flowy 1s linear infinite;opacity:.85}}
 @keyframes flowy{{to{{background-position:0 20px}}}}
 li{{position:relative;display:flex;gap:14px;align-items:flex-start;margin:0 0 12px 0}}
@@ -135,7 +175,8 @@ li{{position:relative;display:flex;gap:14px;align-items:flex-start;margin:0 0 12
 .h{{font-weight:700;font-size:14.5px;margin-bottom:2px}}
 .p{{font-size:13px;color:{c['mute']};line-height:1.4}}
 """
-    return _wrap(f"<ol>{items}</ol>", css, dark)
+    hint = "Scroll to zoom · drag to pan" if lang == "en" else "Gulir untuk zoom · seret untuk menggeser"
+    return _viewer(f"<ol>{items}</ol>", css, dark, 760, "width", hint)
 
 
 # ----------------------------------------------------------------------------------------------- isi
@@ -172,9 +213,11 @@ def render_body():
     lang = st.session_state.get("lang", "en")
     tab1, tab2, tab3 = st.tabs([L("Architecture", "Arsitektur"), L("Walkthrough", "Alur pelaksanaan"), L("Rights & limits", "Hak & batasan")])
     with tab1:
-        components.html(architecture_html(dark, lang), height=560, scrolling=False)
+        components.html(architecture_html(dark, lang), height=600, scrolling=False)
+        st.caption(L("Both workspaces use the same engine; only the inputs and the storage differ. The demo never writes to the operational database.",
+                     "Kedua ruang kerja memakai mesin yang sama; hanya masukan dan penyimpanan yang berbeda. Demo tidak pernah menulis ke database operasional."))
     with tab2:
-        components.html(flow_html(dark, lang), height=620, scrolling=True)
+        components.html(flow_html(dark, lang), height=600, scrolling=False)
     with tab3:
         st.markdown("**" + L("Who may edit, correct or void", "Siapa boleh mengedit, mengoreksi, atau membatalkan") + "**")
         table([{L("Object", "Objek"): o, L("Action", "Aksi"): a, "Admin": ad, "Operator": op, L("Viewer", "Pengamat"): v}
