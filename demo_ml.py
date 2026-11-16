@@ -82,7 +82,7 @@ def generate_corpus(seed: int = 42, n_plots: int = N_PLOTS, n_days: int = N_DAYS
             tmean, dtr = (tmin + tmax) / 2.0, tmax - tmin
             day_info[d] = {"tmean": tmean, "dtr": dtr, "et0": et0, "etc": kc * et0, "kc": kc}
             obs.append({"obs_id": v * 10000 + k, "value": round(h, 2), "observed_at": t, "received_at": t + timedelta(minutes=10),
-                        "source_type": "MANUAL"})
+                        "source_type": "MANUAL", "record_status": "ACTIVE", "quality_flag": "OK", "is_demo": True})
             if k == n_days:
                 break
             if h <= -14.0:                                                   # irigasi AWD: isi sampai +4 cm
@@ -92,26 +92,25 @@ def generate_corpus(seed: int = 42, n_plots: int = N_PLOTS, n_days: int = N_DAYS
             r = true_residual(tmean, dtr, h) + 0.35 * _gauss(seed, v, k)
             h, _ = pe.advance_h(h, kc * et0 + r, MU, MU, 15.0)
 
-        def mean_etc(t0, t1, _info=day_info):
-            vals, d = [], t0.astimezone(TZ).date()
-            while d <= t1.astimezone(TZ).date():
-                if d in _info:
-                    vals.append(_info[d]["etc"])
-                d += timedelta(days=1)
-            return sum(vals) / len(vals) if vals else None
+        def _series(key, _info=day_info):
+            return {d: v[key] for d, v in _info.items()}
 
-        labs = lb.build_window_labels(obs, events, [], (obs[0]["observed_at"], obs[-1]["observed_at"]), mean_etc, MU,
-                                      w_min_days=2.0, w_max_days=3.0)
+        def mean_etc(t0, t1, _s=_series("etc")):                  # rerata berbobot durasi pada [t0, t1) — dukungan waktu = label
+            return lb.mean_over_interval(_s, t0, t1, TZ)
+
+        labs = lb.build_window_labels(obs, events, [], [(obs[0]["observed_at"], obs[-1]["observed_at"])], mean_etc, MU,
+                                      w_min_days=2.0, w_max_days=3.0, purpose="DEMO_SYNTHETIC")
         by_id = {o["obs_id"]: o for o in obs}
         for lab in labs:
             lab["plot"] = v
             if lab["validity"] != "VALID":
                 continue
             a = by_id[lab["start_obs_id"]]
-            days = [day_info[(a["observed_at"] + timedelta(days=i)).date()] for i in range(int(round(lab["w_days"])))]
-            x = {"tmean": sum(d["tmean"] for d in days) / len(days), "dtr": sum(d["dtr"] for d in days) / len(days),
-                 "et0": sum(d["et0"] for d in days) / len(days), "etc": sum(d["etc"] for d in days) / len(days),
-                 "h_start": a["value"], "kc": kc}
+            x = {f: lb.mean_over_interval(_series(f), lab["start"], lab["end"], TZ) for f in ("tmean", "dtr", "et0", "etc")}
+            if any(val is None for val in x.values()):
+                lab["validity"] = "FEATURE_UNAVAILABLE"
+                continue
+            x.update(h_start=a["value"], kc=kc)
             lab["x"] = [x[f] for f in FEATURES]
             lab["h_start"], lab["h_end_obs"] = a["value"], by_id[lab["end_obs_id"]]["value"]
         all_labels.extend(labs)

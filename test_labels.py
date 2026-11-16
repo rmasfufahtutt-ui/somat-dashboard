@@ -7,7 +7,8 @@ ETC = lambda a, b: 5.0
 
 def ob(i, days, v, src="MANUAL"):
     t = T0 + timedelta(days=days)
-    return {"obs_id": i, "value": v, "observed_at": t, "received_at": t + timedelta(hours=1), "source_type": src}
+    return {"obs_id": i, "value": v, "observed_at": t, "received_at": t + timedelta(hours=1), "source_type": src,
+            "record_status": "ACTIVE", "quality_flag": "OK", "is_demo": False}
 
 
 def build(obs, irr=(), rain=(), cov=None, **kw):
@@ -36,7 +37,7 @@ def test_rise_and_zero_crossing_and_dummy():
     labs = build([ob(1, 0, -5), ob(2, 1, -2), ob(3, 2, -9)])
     assert any(l["validity"] == "RISE_IN_WINDOW" for l in labs)
     assert build([ob(1, 0, 2), ob(2, 2, -3)])[0]["validity"] == "CROSSES_ZERO"
-    assert build([ob(1, 0, -5, "DUMMY"), ob(2, 2, -12)])[0]["validity"] == "NON_REAL_SOURCE"
+    assert build([ob(1, 0, -5, "DUMMY"), ob(2, 2, -12)])[0]["validity"] == "NON_RESEARCH_SOURCE"
 
 
 def test_window_length_bounds():
