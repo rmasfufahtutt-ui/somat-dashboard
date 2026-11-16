@@ -223,8 +223,76 @@ def ai_panel(ctx, pid: str, res: dict):
             st.warning(L("The ML residual was clipped to the allowed range.", "Residual ML dipotong ke rentang yang diizinkan."))
     trajectory_compare(m1, m2, f"demo_trj_cmp_{pid}")
     with st.expander(L("Training details", "Rincian pelatihan")):
-        st.json({"model_id": status["model_id"], "split": m["split"], "chosen": m["chosen"],
-                 "feature_importance": m["feature_importance"], "corpus": (status["config"] or {}).get("corpus")})
+        _training_details(status, m)
+
+
+_FEATURE_NAMES = {
+    "tmean": ("Mean temperature", "Suhu rerata"), "dtr": ("Daily temperature range", "Rentang suhu harian"),
+    "et0": ("Reference ET0", "ET0 acuan"), "etc": ("Crop ET (ETc)", "ETc tanaman"),
+    "h_start": ("Water level at window start", "h awal jendela"), "kc": ("Crop coefficient Kc", "Koefisien Kc")}
+_REJECT_NAMES = {
+    "CROSSES_ZERO": ("h crosses 0 in window", "h melintasi 0 dalam jendela"),
+    "IRRIGATION_IN_WINDOW": ("Irrigation inside window", "Ada irigasi dalam jendela"),
+    "RISE_IN_WINDOW": ("h rises inside window", "h naik dalam jendela"),
+    "RAIN_IN_WINDOW": ("Rain inside window", "Hujan dalam jendela"),
+    "RAIN_UNKNOWN": ("Rain unknown / coverage gap", "Hujan tidak diketahui / celah cakupan"),
+    "NON_RESEARCH_SOURCE": ("Source/status not accepted", "Sumber/status tidak diterima"),
+    "ETC_UNAVAILABLE": ("ETc unavailable", "ETc tidak tersedia"),
+    "FEATURE_UNAVAILABLE": ("Feature unavailable", "Fitur tidak tersedia")}
+
+
+def _training_details(status: dict, m: dict):
+    """Rincian pelatihan yang terbaca manusia (bukan JSON mentah): ringkasan, pembagian data, hiperparameter, fitur penting."""
+    cfg = status.get("config") or {}
+    corpus = cfg.get("corpus") or {}
+    sp = m.get("split") or {}
+    ch = m.get("chosen") or {}
+    total = max(1, sum(int(sp.get(k, 0)) for k in ("train", "valid", "test")))
+
+    st.markdown("**" + L("Summary", "Ringkasan") + "**")
+    table([
+        {L("Item", "Butir"): L("Model", "Model"), L("Value", "Nilai"): f"Random Forest (residual M2) · {status.get('model_id', '-')}"},
+        {L("Item", "Butir"): L("Data source", "Sumber data"),
+         L("Value", "Nilai"): L("Synthetic simulation (DEMO_SYNTHETIC) — not field data", "Simulasi sintetis (DEMO_SYNTHETIC) — bukan data lapangan")},
+        {L("Item", "Butir"): L("Corpus", "Korpus"),
+         L("Value", "Nilai"): L(f"{corpus.get('n_plots', '-')} virtual plots × {corpus.get('n_days', '-')} days, seed {corpus.get('seed', '-')}",
+                                f"{corpus.get('n_plots', '-')} petak virtual × {corpus.get('n_days', '-')} hari, seed {corpus.get('seed', '-')}")},
+        {L("Item", "Butir"): L("Candidate windows", "Jendela kandidat"),
+         L("Value", "Nilai"): L(f"{corpus.get('n_windows', '-')} candidates → {corpus.get('n_valid', '-')} valid labels",
+                                f"{corpus.get('n_windows', '-')} kandidat → {corpus.get('n_valid', '-')} label valid")},
+    ], key="demo_train_summary")
+
+    st.markdown("**" + L("Data split (temporal)", "Pembagian data (temporal)") + "**")
+    names = {"train": ("Train", "Latih"), "valid": ("Validation", "Validasi"), "test": ("Test", "Uji"),
+             "dropped": ("Dropped (crosses boundary / not yet available)", "Dibuang (melintasi batas / belum tersedia)")}
+    table([{L("Set", "Set"): L(*names[k]), L("Windows", "Jendela"): int(sp.get(k, 0)),
+            L("Share", "Porsi"): (f"{100.0 * int(sp.get(k, 0)) / total:.0f}%" if k != "dropped" else "—")}
+           for k in ("train", "valid", "test", "dropped") if k in sp], key="demo_train_split")
+    st.caption(L("Hyperparameters were chosen on the validation set; the test set is used once for reporting.",
+                 "Hiperparameter dipilih pada set validasi; set uji dipakai sekali untuk laporan."))
+
+    st.markdown("**" + L("Chosen hyperparameters", "Hiperparameter terpilih") + "**")
+    table([{L("Parameter", "Parameter"): "max_depth", L("Value", "Nilai"): ch.get("max_depth", "-")},
+           {L("Parameter", "Parameter"): "min_samples_leaf", L("Value", "Nilai"): ch.get("min_samples_leaf", "-")},
+           {L("Parameter", "Parameter"): "n_estimators", L("Value", "Nilai"): 120}], key="demo_train_hp")
+
+    fi = m.get("feature_importance") or {}
+    if fi:
+        st.markdown("**" + L("Which inputs matter most", "Masukan yang paling berpengaruh") + "**")
+        items = sorted(fi.items(), key=lambda kv: kv[1])
+        fig = go.Figure(go.Bar(x=[round(100.0 * v, 1) for _, v in items], y=[L(*_FEATURE_NAMES.get(k, (k, k))) for k, _ in items],
+                               orientation="h", marker_color="#4E8DF5",
+                               text=[f"{100.0 * v:.1f}%" for _, v in items], textposition="outside", cliponaxis=False))
+        fig.update_layout(height=280, margin=dict(l=10, r=40, t=10, b=10), xaxis_title=L("Importance (%)", "Kepentingan (%)"))
+        plot(apply_plot_theme(fig), key="demo_train_fi")
+
+    rej = corpus.get("rejected") or {}
+    if rej:
+        st.markdown("**" + L("Why windows were rejected as labels", "Alasan jendela ditolak sebagai label") + "**")
+        table([{L("Reason", "Alasan"): L(*_REJECT_NAMES.get(k, (k, k))), L("Windows", "Jendela"): int(v)}
+               for k, v in sorted(rej.items(), key=lambda kv: -kv[1])], key="demo_train_rej")
+    st.caption(L("All of this comes from synthetic data and shows how the pipeline works. It is not evidence of field accuracy.",
+                 "Seluruhnya berasal dari data sintetis dan menunjukkan cara alur bekerja. Bukan bukti akurasi lapangan."))
 
 
 # ---------------------------------------------------------------------------------------------- ringkasan / grafik demo

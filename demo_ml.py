@@ -24,6 +24,7 @@ import demo_repository as drepo
 import demo_weather as dw
 import et0 as et0lib
 import labels as lb
+import ml_features as mf
 import physics_engine as pe
 
 try:                                                    # pragma: no cover - ketersediaan tergantung lingkungan
@@ -35,7 +36,7 @@ except Exception:                                       # pragma: no cover
 
 TZ = dw.TZ
 KIND = "RF_RESIDUAL"
-FEATURES = ("tmean", "dtr", "et0", "etc", "h_start", "kc")
+FEATURES = mf.FEATURES
 BASE_DATE = date(2025, 1, 1)             # tanggal tetap: korpus & metrik reproduktif, tidak bergantung hari ini
 N_PLOTS, N_DAYS = 8, 300
 TRAIN_DAYS, VALID_DAYS = 180, 240
@@ -80,7 +81,7 @@ def generate_corpus(seed: int = 42, n_plots: int = N_PLOTS, n_days: int = N_DAYS
             tmin, tmax = dw.day_temps(d, prof, f"ml-{seed}-{v}", BASE_DATE)
             et0 = et0lib.hargreaves_et0(tmin, tmax, lat, d.timetuple().tm_yday)["et0_mm_day"]
             tmean, dtr = (tmin + tmax) / 2.0, tmax - tmin
-            day_info[d] = {"tmean": tmean, "dtr": dtr, "et0": et0, "etc": kc * et0, "kc": kc}
+            day_info[d] = {"tmean": tmean, "dtr": dtr, "et0": et0, "etc": kc * et0, "kc": kc, "tmin": tmin, "tmax": tmax}
             obs.append({"obs_id": v * 10000 + k, "value": round(h, 2), "observed_at": t, "received_at": t + timedelta(minutes=10),
                         "source_type": "MANUAL", "record_status": "ACTIVE", "quality_flag": "OK", "is_demo": True})
             if k == n_days:
@@ -106,12 +107,14 @@ def generate_corpus(seed: int = 42, n_plots: int = N_PLOTS, n_days: int = N_DAYS
             if lab["validity"] != "VALID":
                 continue
             a = by_id[lab["start_obs_id"]]
-            x = {f: lb.mean_over_interval(_series(f), lab["start"], lab["end"], TZ) for f in ("tmean", "dtr", "et0", "etc")}
-            if any(val is None for val in x.values()):
-                lab["validity"] = "FEATURE_UNAVAILABLE"
+            x, why = mf.build_features({k: _series(k) for k in mf.DAILY_KEYS}, lab["start"], lab["end"], a["value"], kc, TZ)
+            if x is None:
+                lab["validity"], lab["feature_problem"] = "FEATURE_UNAVAILABLE", why
                 continue
-            x.update(h_start=a["value"], kc=kc)
             lab["x"] = [x[f] for f in FEATURES]
+            lab["snapshot_days"] = [{"date": d, "status": "OK", "tmin": day_info[d]["tmin"], "tmax": day_info[d]["tmax"],
+                                     "et0_mm_day": day_info[d]["et0"]}
+                                    for d in sorted(day_info) if lab["start"].astimezone(TZ).date() <= d <= lab["end"].astimezone(TZ).date()]
             lab["h_start"], lab["h_end_obs"] = a["value"], by_id[lab["end_obs_id"]]["value"]
         all_labels.extend(labs)
     valid = [l for l in all_labels if l["validity"] == "VALID"]
@@ -232,17 +235,14 @@ def load_model():
     return _CACHE[mid], rec
 
 
-def features_from_output(out: dict, snapshot: dict, kc: float) -> dict | None:
-    """Fitur dari hasil hitung M1 (h pada waktu keputusan + ET0/suhu harian yang dipakai mesin)."""
-    et = snapshot.get("et0_daily") or []
-    ok = [e for e in et if e.get("status") == "OK" and e.get("et0_mm_day") is not None]
+def features_from_output(out: dict, snapshot: dict, kc, decision_at=None) -> tuple:
+    """Fitur operasi dari hasil M1 + snapshot: PEMBENTUK YANG SAMA dengan pelatihan (ml_features), jendela [keputusan, keputusan + W).
+    -> (fitur | None, alasan | None). Tidak ada tebakan bila ada hari tanpa nilai OK."""
     h_dec = out.get("h_decision_cm")
-    if not ok or h_dec is None or kc is None:
-        return None
-    day = ok[0]
-    tmean = (day["tmin"] + day["tmax"]) / 2.0
-    return {"tmean": tmean, "dtr": day["tmax"] - day["tmin"], "et0": day["et0_mm_day"], "etc": kc * day["et0_mm_day"],
-            "h_start": h_dec, "kc": kc}
+    t0 = decision_at or snapshot.get("decision_at")
+    if t0 is None:
+        return None, "waktu keputusan tidak tersedia"
+    return mf.features_for_decision(snapshot.get("et0_daily") or [], t0, h_dec, kc, TZ)
 
 
 def predict_residual(x: dict) -> dict:
@@ -266,9 +266,9 @@ def compare_models(plot_id: str, decision_at=None, weather=None, bias: float = 0
     kc = None
     if prof and out1.get("phase_decision"):
         kc = ((prof["params"].get(f"kc_{out1['phase_decision']}") or {}).get("value"))
-    x = features_from_output(out1, snap1, kc)
+    x, why = features_from_output(out1, snap1, kc, ds._utc(decision_at or drepo.now_utc()))
     if x is None:
-        res["residual"] = {"available": False, "reason": "Fitur tidak lengkap (ET0/h tidak tersedia)"}
+        res["residual"] = {"available": False, "reason": f"Fitur tidak lengkap: {why}"}
         return res
     pr = predict_residual(x)
     res["residual"] = {**pr, "features": x}
