@@ -209,7 +209,7 @@ def can_access_page(page_key, user=None):
     u = user or current_user()
     if not u:
         return False
-    if page_key in ("account", "guide"):
+    if page_key == "account":
         return True
     if page_key == "admin":
         return u.get("role") == "admin"

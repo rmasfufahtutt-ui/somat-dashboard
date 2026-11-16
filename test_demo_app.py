@@ -58,7 +58,7 @@ def test_demo_login_without_production_db_and_banner(app):
 
 def test_all_pages_render_for_each_demo_role(app):
     _login(app, "demo_admin")
-    for p in ("overview", "monitoring", "prediction", "operator", "observations", "execution", "alerts", "guide", "account", "admin"):
+    for p in ("overview", "monitoring", "prediction", "operator", "observations", "execution", "alerts", "account", "admin"):
         _go(app, p)
 
 
@@ -66,7 +66,7 @@ def test_viewer_has_no_decision_pages(app):
     _login(app, "demo_viewer")
     keys = {b.key for b in app.button if b.key and b.key.startswith("nav_")}
     assert "nav_operator" not in keys and "nav_observations" not in keys and "nav_admin" not in keys
-    assert "nav_guide" in keys and "nav_overview" in keys
+    assert "nav_guide" not in keys and "nav_overview" in keys
 
 
 def test_publish_decide_and_execute_flow(app):
@@ -136,7 +136,7 @@ def test_prediction_selectors_survive_navigation(app):
     app.selectbox(key="pred_plot").select("DEMO-P03").run()
     app.selectbox(key="demo_rain").select("NONE").run()
     app.selectbox(key="demo_model").select("M2").run()
-    for p in ("overview", "operator", "guide"):
+    for p in ("overview", "operator", "alerts"):
         _go(app, p)
     _go(app, "prediction")
     assert app.selectbox(key="pred_plot").value == "DEMO-P03"

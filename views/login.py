@@ -19,6 +19,10 @@ def render_demo_login(key="demo_login"):
     st.markdown("**" + L("Research demo (synthetic data)", "Demo penelitian (data sintetis)") + "**")
     st.caption(L("For presentation and trials. Isolated from operational data; BMKG stays real.",
                  "Untuk presentasi dan uji coba. Terpisah dari data operasional; BMKG tetap asli."))
+    if st.button("📘 " + L("Demo Guide", "Panduan Demo"), key=f"{key}_guide", width="stretch",
+                 help=L("Architecture, walkthrough, who can edit what", "Arsitektur, alur pelaksanaan, siapa boleh mengedit apa")):
+        from views import guide
+        guide.open_guide()
     roles = [("demo_admin", L("Demo as Admin", "Demo sebagai Admin")),
              ("demo_operator", L("Demo as Operator", "Demo sebagai Operator")),
              ("demo_viewer", L("Demo as Viewer", "Demo sebagai Pengamat"))]

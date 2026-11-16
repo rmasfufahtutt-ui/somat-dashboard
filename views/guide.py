@@ -1,36 +1,144 @@
-"""views/guide.py - Panduan Demo: alur presentasi, diagram arsitektur, tabel hak edit/koreksi/void, dan batasan."""
+"""views/guide.py - Panduan Demo sebagai OVERLAY di layar masuk (bukan tab/halaman).
+
+Dibuka dari tombol "Demo Guide" di layar masuk (st.dialog). Berisi diagram arsitektur dan alur pelaksanaan yang
+digambar dengan kode (SVG/CSS beranimasi, latar transparan mengikuti tema), tabel hak, dan batasan.
+"""
 from __future__ import annotations
 
 import streamlit as st
+import streamlit.components.v1 as components
 
-import demo_mode
 from i18n import L
-from ui_kit import banner, table
+from ui_kit import table
 
-ARCH_DOT = r"""
-digraph G {
-  rankdir=LR; fontname="Helvetica"; node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, fillcolor="#EAF2FF", color="#2F80ED"];
-  edge [fontname="Helvetica", fontsize=9, color="#667"];
-  user [label="Pengguna\n(login / akun demo)", fillcolor="#FFF4E0", color="#E4A11B"];
-  app  [label="app.py\nmode: OPERASIONAL | DEMO\n+ banner DEMO"];
-  router [label="repo_router.py\n(pilih backend per sesi)"];
-  subgraph cluster_ops { label="OPERASIONAL"; style="rounded,dashed"; color="#16884A"; fontcolor="#16884A";
-    ops [label="repository.py\nNeon / PostgreSQL", fillcolor="#E5F7EC", color="#16884A"];
-    hub [label="data_hub\n(Google Sheets, BMKG)", fillcolor="#E5F7EC", color="#16884A"]; }
-  subgraph cluster_demo { label="DEMO PENELITIAN (terpisah)"; style="rounded,dashed"; color="#D85A10"; fontcolor="#D85A10";
-    demo [label="demo_repository.py\nSQLite lokal (is_demo, dataset_id)", fillcolor="#FFE9DC", color="#D85A10"];
-    gen  [label="demo_data.py\n6 petak, >=35 hari,\nskenario dari mesin", fillcolor="#FFE9DC", color="#D85A10"];
-    wx   [label="demo_weather.py\ncuaca sintetis berlabel", fillcolor="#FFE9DC", color="#D85A10"];
-    ml   [label="demo_ml.py\nRandom Forest (data sintetis)", fillcolor="#FFE9DC", color="#D85A10"]; }
-  engine [label="Mesin SOMAT (SAMA)\nphysics_engine + recommendation_service\n+ et0 + labels", fillcolor="#F1E9FF", color="#7C3AED"];
-  bmkg [label="BMKG asli\n(prakiraan)", fillcolor="#E5F7EC", color="#16884A"];
-  user -> app; app -> router; router -> ops [label="OPERASIONAL"]; router -> demo [label="DEMO"];
-  gen -> demo [label="seed / reset"]; wx -> engine [label="suhu & hujan skenario"]; ml -> engine [label="residual M2"];
-  engine -> ops [label="run baseline"]; engine -> demo [label="run 'DEMO' + keputusan 'DEMO'"];
-  bmkg -> hub; hub -> engine [label="baca saja (opsional di DEMO)"];
+# ----------------------------------------------------------------------------------------------- palet
+PAL = {
+    True: dict(text="#E8EEF8", mute="#94A3B8", card="#111B2C", line="#2B3C57", blue="#4C9AFF", green="#34C77B", orange="#F59E4B",
+               violet="#A78BFA", gcard="#0F2A22", ocard="#33200F", vcard="#221A3D", bcard="#10243F"),
+    False: dict(text="#14213D", mute="#5B6B82", card="#FFFFFF", line="#C9D5E6", blue="#2F80ED", green="#16884A", orange="#D85A10",
+                violet="#7C3AED", gcard="#E5F7EC", ocard="#FFE9DC", vcard="#F1E9FF", bcard="#EAF2FF"),
 }
-"""
 
+
+def _dark() -> bool:
+    return not bool(st.session_state.get("light_mode", False))
+
+
+def _wrap(body: str, css: str, dark: bool) -> str:
+    return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{{margin:0;padding:0;background:transparent;color:{PAL[dark]['text']};font-family:"Source Sans Pro","Segoe UI",Arial,sans-serif}}
+{css}
+@media (prefers-reduced-motion: reduce){{*{{animation:none !important}} animateMotion{{display:none}}}}
+</style></head><body>{body}</body></html>"""
+
+
+# ----------------------------------------------------------------------------------------------- diagram arsitektur (SVG)
+def architecture_html(dark: bool, lang: str) -> str:
+    c = PAL[dark]
+    T = (lambda en, idn: en if lang == "en" else idn)
+
+    def node(x, y, w, h, title, sub, fill, stroke):
+        lines = "".join(f'<text x="{x + w / 2}" y="{y + 40 + i * 15}" class="sub">{s}</text>' for i, s in enumerate(sub))
+        return (f'<g class="node"><rect x="{x}" y="{y}" width="{w}" height="{h}" rx="12" fill="{fill}" stroke="{stroke}" stroke-width="1.6"/>'
+                f'<text x="{x + w / 2}" y="{y + 23}" class="ttl">{title}</text>{lines}</g>')
+
+    def edge(d, color, label="", lx=0, ly=0, dur=1.4):
+        lab = f'<text x="{lx}" y="{ly}" class="elab" fill="{color}">{label}</text>' if label else ""
+        return (f'<path d="{d}" class="flow" stroke="{color}" style="animation-duration:{dur}s" marker-end="url(#a-{color[1:]})"/>'
+                f'<circle r="3.6" fill="{color}"><animateMotion dur="{dur * 2.4}s" repeatCount="indefinite" path="{d}"/></circle>{lab}')
+
+    markers = "".join(f'<marker id="a-{col[1:]}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+                      f'<path d="M0,0 L10,5 L0,10 z" fill="{col}"/></marker>' for col in (c["blue"], c["green"], c["orange"], c["violet"]))
+    svg = f"""
+<svg viewBox="0 0 960 540" width="100%" role="img" aria-label="{T('SOMAT architecture','Arsitektur SOMAT')}">
+<defs>{markers}</defs>
+<rect x="686" y="10" width="270" height="214" rx="16" fill="none" stroke="{c['green']}" stroke-width="1.4" stroke-dasharray="6 5"/>
+<text x="702" y="32" class="cl" fill="{c['green']}">{T('OPERATIONAL','OPERASIONAL')}</text>
+<rect x="686" y="250" width="270" height="280" rx="16" fill="none" stroke="{c['orange']}" stroke-width="1.4" stroke-dasharray="6 5"/>
+<text x="702" y="272" class="cl" fill="{c['orange']}">{T('RESEARCH DEMO (separate)','DEMO PENELITIAN (terpisah)')}</text>
+
+{node(18, 30, 176, 72, T('User','Pengguna'), [T('sign in / demo account','login / akun demo')], c['card'], c['orange'])}
+{node(18, 176, 176, 78, 'app.py', ['OPERATIONAL | DEMO', T('+ DEMO banner','+ banner DEMO')], c['bcard'], c['blue'])}
+{node(18, 328, 176, 72, 'repo_router', [T('selects the repository','memilih repositori'), T('per session','per sesi')], c['bcard'], c['blue'])}
+
+{node(284, 150, 230, 250, T('SOMAT engine (same)','Mesin SOMAT (sama)'), ['physics_engine', 'et0 (Hargreaves–Samani)', 'recommendation_service', T('Baseline M0 / M1','Baseline M0 / M1'), T('+ residual M2','+ residual M2')], c['vcard'], c['violet'])}
+
+{node(702, 44, 238, 66, 'Neon PostgreSQL', ['repository.py', T('real records','catatan nyata')], c['gcard'], c['green'])}
+{node(702, 126, 238, 80, 'data_hub', [T('Google Sheets sensors','sensor Google Sheets'), T('BMKG forecast (real)','prakiraan BMKG (asli)')], c['gcard'], c['green'])}
+{node(702, 284, 238, 62, 'SQLite demo', [T('loaded from seed file','dimuat dari file seed')], c['ocard'], c['orange'])}
+{node(702, 360, 238, 62, 'demo_weather', [T('synthetic temperature & rain','suhu & hujan sintetis')], c['ocard'], c['orange'])}
+{node(702, 436, 238, 76, 'Random Forest', [T('trained on synthetic data','dilatih data sintetis'), T('(demo only)','(hanya demo)')], c['ocard'], c['orange'])}
+
+{edge('M106,102 L106,172', c['orange'], '', 0, 0, 1.2)}
+{edge('M106,254 L106,324', c['blue'], '', 0, 0, 1.2)}
+{edge('M194,364 C236,364 244,340 280,340', c['blue'], '', 0, 0, 1.2)}
+{edge('M514,190 C610,190 600,77 698,77', c['green'], T('run baseline','run baseline'), 606, 128, 1.6)}
+{edge('M698,172 C610,172 600,235 514,235', c['green'], T('forecast (read-only)','prakiraan (baca saja)'), 626, 158, 1.8)}
+{edge('M514,300 C600,300 610,315 698,315', c['orange'], T('run DEMO + decisions','run DEMO + keputusan'), 612, 288, 1.6)}
+{edge('M698,391 C610,391 600,350 514,350', c['orange'], T('scenario weather','cuaca skenario'), 646, 372, 1.6)}
+{edge('M698,474 C610,474 600,385 514,385', c['violet'], T('M2 residual','residual M2'), 652, 458, 1.8)}
+</svg>"""
+    css = f"""
+.ttl{{font-size:14px;font-weight:700;text-anchor:middle;fill:{c['text']}}}
+.sub{{font-size:11.5px;text-anchor:middle;fill:{c['mute']}}}
+.cl{{font-size:12px;font-weight:700;letter-spacing:.06em}}
+.elab{{font-size:11px;font-weight:600;text-anchor:middle}}
+.flow{{fill:none;stroke-width:2;stroke-dasharray:6 7;animation:dash 1.2s linear infinite;opacity:.95}}
+@keyframes dash{{to{{stroke-dashoffset:-26}}}}
+.node{{filter:drop-shadow(0 2px 6px rgba(0,0,0,.18))}}
+svg{{display:block;max-width:100%;height:auto}}
+"""
+    note = T("Both workspaces use the same engine; only the inputs and the storage differ. The demo never writes to the operational database.",
+             "Kedua ruang kerja memakai mesin yang sama; hanya masukan dan penyimpanan yang berbeda. Demo tidak pernah menulis ke database operasional.")
+    return _wrap(svg + f'<p style="font-size:12.5px;color:{c["mute"]};margin:.4rem .2rem 0">{note}</p>', css, dark)
+
+
+# ----------------------------------------------------------------------------------------------- alur pelaksanaan (timeline beranimasi)
+STEPS = [
+    ("🔑", ("Sign in", "Masuk"), ("Choose Demo as Admin / Operator / Viewer on the sign-in screen. The orange DEMO banner appears.",
+                                  "Pilih Demo sebagai Admin / Operator / Pengamat di layar masuk. Banner oranye DEMO tampil.")),
+    ("🗂️", ("Data is already there", "Data sudah terisi"), ("6 plots, 35+ days of h readings, decisions, irrigation records and a pending recommendation load by themselves.",
+                                                            "6 petak, riwayat h 35+ hari, keputusan, irigasi, dan rekomendasi menunggu terisi otomatis.")),
+    ("📊", ("Overview", "Ringkasan"), ("Six scenarios (irrigate, safe, rain hold, stale h, missing parameter, target not reachable) with charts.",
+                                    "Enam skenario (irigasi, aman, tahan hujan, h usang, parameter hilang, target tak tercapai) beserta grafik.")),
+    ("🪣", ("Field observations", "Pengamatan lapangan"), ("Operator enters h from the pipe: Fill example → Save. Try Correct and Void.",
+                                                          "Operator mengisi h dari pipa: Isi contoh → Simpan. Coba Koreksi dan VOID.")),
+    ("💧", ("Prediction & recommendation", "Prediksi & rekomendasi"), ("Pick temperature source, rain scenario and model M1/M2. “Why this recommendation?” explains every step. Publish.",
+                                                                  "Pilih sumber suhu, skenario hujan, dan model M1/M2. “Mengapa rekomendasi ini?” menjelaskan tiap langkah. Terbitkan.")),
+    ("👷", ("Operator decision", "Keputusan operator"), ("APPROVE, MODIFY (amount must change + reason) or DELAY. Labelled SIMULATION.",
+                                                        "APPROVE, MODIFY (jumlah harus berubah + alasan) atau DELAY. Berlabel SIMULASI.")),
+    ("🚿", ("Irrigation execution", "Pelaksanaan irigasi"), ("Record what actually flowed; the chain SOMAT → operator → actual is shown.",
+                                                           "Catat air yang benar-benar mengalir; rantai SOMAT → operator → aktual ditampilkan.")),
+    ("🤖", ("Evaluation & AI model", "Evaluasi & model AI"), ("Prediction vs observed h; Admin → Demo trains the Random Forest and Prediction compares M1 vs M2.",
+                                                           "Prediksi vs h teramati; Admin → Demo melatih Random Forest dan Prediksi membandingkan M1 vs M2.")),
+]
+
+
+def flow_html(dark: bool, lang: str) -> str:
+    c = PAL[dark]
+    i = 0 if lang == "en" else 1
+    items = "".join(
+        f'<li style="--d:{k * 0.45}s"><span class="dot"><b>{k + 1}</b></span><div class="card"><div class="h">{ic} {ttl[i]}</div>'
+        f'<div class="p">{txt[i]}</div></div></li>' for k, (ic, ttl, txt) in enumerate(STEPS))
+    css = f"""
+ol{{list-style:none;margin:0;padding:6px 0 6px 0;position:relative}}
+ol::before{{content:"";position:absolute;left:19px;top:10px;bottom:10px;width:3px;border-radius:3px;
+  background:repeating-linear-gradient({c['blue']} 0 10px, transparent 10px 20px);background-size:3px 20px;animation:flowy 1s linear infinite;opacity:.85}}
+@keyframes flowy{{to{{background-position:0 20px}}}}
+li{{position:relative;display:flex;gap:14px;align-items:flex-start;margin:0 0 12px 0}}
+.dot{{flex:0 0 40px;height:40px;border-radius:50%;background:{c['bcard']};border:2px solid {c['blue']};display:grid;place-items:center;z-index:1;
+  animation:pulse 4s ease-in-out infinite;animation-delay:var(--d)}}
+.dot b{{font-size:15px;color:{c['text']}}}
+@keyframes pulse{{0%,100%{{box-shadow:0 0 0 0 transparent}}12%{{box-shadow:0 0 0 7px {c['blue']}33}}28%{{box-shadow:0 0 0 0 transparent}}}}
+.card{{flex:1;background:{c['card']};border:1px solid {c['line']};border-radius:12px;padding:9px 13px;min-width:0}}
+.h{{font-weight:700;font-size:14.5px;margin-bottom:2px}}
+.p{{font-size:13px;color:{c['mute']};line-height:1.4}}
+"""
+    return _wrap(f"<ol>{items}</ol>", css, dark)
+
+
+# ----------------------------------------------------------------------------------------------- isi
 RIGHTS = [
     # (objek, aksi, Admin, Operator, Pengamat)
     ("Pengamatan h", "Input baru", "ya", "ya", "tidak"),
@@ -43,57 +151,43 @@ RIGHTS = [
     ("Keputusan", "Delete = VOID (beralasan)", "ya", "tidak", "tidak"),
     ("Pelaksanaan (simulasi)", "Catat", "ya", "ya", "tidak"),
     ("Pelaksanaan (simulasi)", "VOID", "semua", "milik sendiri", "tidak"),
-    ("Data awal demo", "Muat / Kembalikan skenario awal / Kosongkan / Ekspor", "ya", "tidak", "tidak"),
-    ("Model AI demo", "Latih", "ya", "tidak", "tidak"),
+    ("Data awal demo", "Kembalikan skenario awal / Kosongkan / Ekspor", "ya", "tidak", "tidak"),
+    ("Model AI demo", "Latih ulang", "ya", "tidak", "tidak"),
 ]
 
-STEPS_ID = [
-    ("Masuk", "Pilih **Demo sebagai Admin** di layar masuk (tanpa database produksi), atau masuk dengan akun nyata lalu pilih ruang kerja **Demo penelitian** di sidebar. Banner oranye DEMO PENELITIAN harus tampak."),
-    ("Muat data", "Admin → **Demo** → **Muat data demo** (aman diulang: tidak menggandakan). **Kembalikan skenario awal** menghapus semua perubahan dan memuat ulang."),
-    ("Ringkasan", "Menu **Ringkasan** menampilkan enam petak DEMO-P01…P06, enam skenario berbeda, dan grafik riwayat h/sensor sintetis."),
-    ("Pengamatan", "Menu **Pengamatan Lapangan** → pilih petak → **Isi contoh** → simpan. Coba koreksi dan VOID. Rekomendasi memakai pengamatan aktif terbaru."),
-    ("Prediksi", "Menu **Prediksi & Rekomendasi**: pilih sumber suhu (sintetis atau BMKG asli), skenario hujan, dan model M1/M2. Panel **Mengapa rekomendasi ini?** menjelaskan tiap langkah. Terbitkan (simulasi)."),
-    ("Keputusan", "Menu **Keputusan Operator**: APPROVE (jumlah sama), MODIFY (jumlah harus berubah + alasan), atau DELAY. Semua berlabel SIMULASI."),
-    ("Pelaksanaan", "Menu **Pelaksanaan Irigasi**: **Isi contoh** → simpan; lihat rantai SOMAT → operator → realisasi simulasi dan evaluasi prediksi vs h."),
-    ("Model AI", "Admin → Demo → **Latih model demo**; lalu di Prediksi lihat perbandingan M1 vs M2 (tanpa SPconstant ganda)."),
-]
-
-LIMITS_ID = [
-    "Semua petak, sensor, parameter, riwayat, keputusan, dan pelaksanaan di ruang DEMO **sintetis**; parameter berstatus CONTOH sehingga mode run selalu DEMO.",
-    "Model AI dilatih dari korpus sintetis yang dibuat berbeda dari SPconstant; metriknya menunjukkan alur bekerja, **bukan akurasi lapangan**.",
-    "Prakiraan BMKG yang dipakai (bila dipilih) adalah data asli dengan keterkinian apa adanya; bila kosong, rekomendasi menjadi INCOMPLETE_FORECAST, bukan diisi data karangan. Hujan BMKG tidak diprakirakan: hujan selalu skenario eksplisit.",
-    "Cuaca sintetis diindeks relatif terhadap tanggal jangkar dataset; bila demo dibuka berhari-hari kemudian, gunakan **Geser waktu** atau **Kembalikan skenario awal** agar skenario kembali sesuai rancangan.",
+LIMITS = [
+    ("All plots, sensors, parameters, history, decisions and execution in the DEMO space are **synthetic**; parameters are EXAMPLE so the run mode is always DEMO.",
+     "Semua petak, sensor, parameter, riwayat, keputusan, dan pelaksanaan di ruang DEMO **sintetis**; parameter berstatus CONTOH sehingga mode run selalu DEMO."),
+    ("The AI model is a Random Forest trained on a synthetic corpus; its metrics show the pipeline works, **not field accuracy**.",
+     "Model AI adalah Random Forest yang dilatih dari korpus sintetis; metriknya menunjukkan alur bekerja, **bukan akurasi lapangan**."),
+    ("BMKG forecast (when chosen) is real, with its real freshness; if it is missing the run becomes INCOMPLETE_FORECAST instead of being filled with invented data. BMKG does not forecast rain here: rain is always an explicit scenario.",
+     "Prakiraan BMKG (bila dipilih) adalah data asli dengan keterkinian apa adanya; bila kosong, rekomendasi menjadi INCOMPLETE_FORECAST, bukan diisi data karangan. Hujan BMKG tidak diprakirakan: hujan selalu skenario eksplisit."),
+    ("Demo times are re-aligned to “now” automatically; **Restore initial scenario** (Admin → Demo) resets all changes.",
+     "Waktu demo diselaraskan ke “sekarang” otomatis; **Kembalikan skenario awal** (Admin → Demo) mengatur ulang semua perubahan."),
 ]
 
 
-def render(ctx=None):
-    st.header(L("📘 Demo Guide", "📘 Panduan Demo"))
-    if demo_mode.is_demo():
-        banner(L(demo_mode.BANNER_EN, demo_mode.BANNER_ID), "warn")
-    st.subheader(L("Architecture: operational vs research demo", "Arsitektur: operasional vs demo penelitian"))
-    try:
-        st.graphviz_chart(ARCH_DOT, width="stretch")
-    except TypeError:
-        st.graphviz_chart(ARCH_DOT, use_container_width=True)
-    st.caption(L("Both spaces share the same engine; only inputs and the storage path differ. The demo never writes to the operational database.",
-                 "Kedua ruang memakai mesin yang sama; hanya masukan dan jalur penyimpanan yang berbeda. Demo tidak pernah menulis ke database operasional."))
-    st.subheader(L("Presentation flow", "Alur presentasi"))
-    for i, (t, d) in enumerate(STEPS_ID, start=1):
-        st.markdown(f"{i}. **{t}** — {d}")
-    st.subheader(L("Who may edit, correct or void", "Siapa boleh mengedit, mengoreksi, atau membatalkan"))
-    table([{L("Object", "Objek"): o, L("Action", "Aksi"): a, "Admin": ad, "Operator": op, L("Viewer", "Pengamat"): v}
-           for o, a, ad, op, v in RIGHTS], key="guide_rights")
-    st.caption(L("Nothing is physically deleted: corrections create new records and the old ones become SUPERSEDED; cancellations are VOID with a reason. "
-                 "Permissions are checked again in the backend, not only in the buttons.",
-                 "Tidak ada yang dihapus fisik: koreksi membuat record baru dan yang lama menjadi SUPERSEDED; pembatalan berupa VOID beralasan. "
-                 "Izin diperiksa ulang di backend, bukan hanya pada tombol."))
-    st.subheader(L("What is real and what is synthetic", "Yang nyata dan yang sintetis"))
-    table([{L("Item", "Item"): "BMKG", L("In the demo", "Di demo"): L("Real, external source; shown with freshness; optional temperature driver", "Asli, sumber eksternal; tampil dengan keterkinian; pilihan sumber suhu"), L("Label", "Label"): "BMKG"},
-           {L("Item", "Item"): L("Plots, sensors, h history", "Petak, sensor, riwayat h"), L("In the demo", "Di demo"): L("Synthetic, fixed seed", "Sintetis, seed tetap"), L("Label", "Label"): "DEMO / SINTETIS"},
-           {L("Item", "Item"): L("Parameters", "Parameter"), L("In the demo", "Di demo"): L("Example values, not calibrated", "Nilai contoh, belum dikalibrasi"), L("Label", "Label"): "EXAMPLE"},
-           {L("Item", "Item"): L("Decisions & execution", "Keputusan & pelaksanaan"), L("In the demo", "Di demo"): L("Simulated, stored with source DEMO", "Simulasi, tersimpan dengan source DEMO"), L("Label", "Label"): "SIMULASI"},
-           {L("Item", "Item"): "AI M2", L("In the demo", "Di demo"): L("Random Forest trained on synthetic data", "Random Forest dilatih dari data sintetis"), L("Label", "Label"): "MODEL AI DEMONSTRASI"}],
-          key="guide_real")
-    st.subheader(L("Limits to state honestly", "Batasan yang perlu disampaikan"))
-    for t in LIMITS_ID:
-        st.markdown("- " + t)
+def render_body():
+    dark = _dark()
+    lang = st.session_state.get("lang", "en")
+    tab1, tab2, tab3 = st.tabs([L("Architecture", "Arsitektur"), L("Walkthrough", "Alur pelaksanaan"), L("Rights & limits", "Hak & batasan")])
+    with tab1:
+        components.html(architecture_html(dark, lang), height=560, scrolling=False)
+    with tab2:
+        components.html(flow_html(dark, lang), height=620, scrolling=True)
+    with tab3:
+        st.markdown("**" + L("Who may edit, correct or void", "Siapa boleh mengedit, mengoreksi, atau membatalkan") + "**")
+        table([{L("Object", "Objek"): o, L("Action", "Aksi"): a, "Admin": ad, "Operator": op, L("Viewer", "Pengamat"): v}
+               for o, a, ad, op, v in RIGHTS], key="guide_rights", max_height=360)
+        st.caption(L("Nothing is physically deleted: corrections create new records (old = SUPERSEDED); cancellations are VOID with a reason. Permissions are re-checked in the backend, not only on the buttons.",
+                     "Tidak ada yang dihapus fisik: koreksi membuat record baru (lama = SUPERSEDED); pembatalan berupa VOID beralasan. Izin diperiksa ulang di backend, bukan hanya pada tombol."))
+        st.markdown("**" + L("What is real and what is synthetic", "Yang nyata dan yang sintetis") + "**")
+        for en, idn in LIMITS:
+            st.markdown("- " + L(en, idn))
+
+
+@st.dialog(L("📘 Demo Guide", "📘 Panduan Demo"), width="large")
+def open_guide():
+    st.caption(L("How to present SOMAT with the built-in research demo. Nothing here touches operational data.",
+                 "Cara mempresentasikan SOMAT dengan demo penelitian bawaan. Tidak ada yang menyentuh data operasional."))
+    render_body()
