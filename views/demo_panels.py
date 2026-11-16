@@ -205,8 +205,9 @@ def ai_panel(ctx, pid: str, res: dict):
     cmp_ = demo_ml.compare_models(pid, res["decision_at"], res["weather"], forecast=res["forecast"])
     r = cmp_["residual"] or {}
     m1, m2 = cmp_["M1"]["output"], (cmp_["M2"] or {}).get("output")
+    m1b = (cmp_.get("M1B") or {}).get("output")
     rows = []
-    for name, o in (("M1", m1), ("M2", m2)):
+    for name, o in (("M1", m1), ("M1B", m1b), ("M2", m2)):
         if o is None:
             rows.append({L("Model", "Model"): name, L("Status", "Status"): r.get("reason", "-")})
             continue
@@ -217,8 +218,10 @@ def ai_panel(ctx, pid: str, res: dict):
                      L("Duration (h)", "Durasi (jam)"): fmt_num(o.get("duration_h")) if o.get("duration_h") else "-"})
     table(rows, key=f"demo_cmp_{pid}")
     if cmp_["M2"] is not None:
-        st.caption(L("M2 uses R_adj = ML residual + bias; SPconstant is NOT added again (no double counting).",
-                     "M2 memakai R_adj = residual ML + bias; SPconstant TIDAK ditambahkan lagi (tanpa hitung ganda)."))
+        st.caption(L("M2 uses R_adj = ML residual + bias; SPconstant is NOT added again (no double counting). "
+                     "M1B = SPconstant + the same bias, so the M1B → M2 difference comes from the ML residual only.",
+                     "M2 memakai R_adj = residual ML + bias; SPconstant TIDAK ditambahkan lagi (tanpa hitung ganda). "
+                     "M1B = SPconstant + bias yang sama, sehingga selisih M1B → M2 hanya berasal dari residual ML."))
         if r.get("clipped"):
             st.warning(L("The ML residual was clipped to the allowed range.", "Residual ML dipotong ke rentang yang diizinkan."))
     trajectory_compare(m1, m2, f"demo_trj_cmp_{pid}")

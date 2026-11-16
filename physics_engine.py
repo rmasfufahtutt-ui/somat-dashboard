@@ -442,8 +442,9 @@ class Drivers:
 def recommend_timed(*, h_obs_cm: Optional[float], observed_at: Optional[datetime], decision_at: datetime,
                     drivers: Optional[Drivers], profile: PlotProfile, rule_at: Callable,
                     phase_breaks=(), kc_param_at: Optional[Callable] = None, model: str = "M1",
-                    max_h_age_hours: float = 30.0, inputs_dummy: bool = False, q_plot_m3s: Optional[float] = None) -> dict:
-    """Rekomendasi per petak dengan selang waktu eksplisit.
+                    max_h_age_hours: float = 30.0, inputs_dummy: bool = False, q_plot_m3s: Optional[float] = None,
+                    bias: float = 0.0) -> dict:
+    """Rekomendasi per petak dengan selang waktu eksplisit. `bias` hanya dipakai M1B (SPconstant + b); M1/M0 mengabaikannya; M2 membawa R_adj sendiri.
 
     * Kondisi h diperambat dari observed_at ke decision_at (selang pengamatan), lalu ke arrival_at = decision_at + L.
     * Interval dipotong pada pergantian tanggal lokal dan fase; F per interval berasal dari ET0 tanggal tsb.
@@ -517,7 +518,8 @@ def recommend_timed(*, h_obs_cm: Optional[float], observed_at: Optional[datetime
     out["issues"].extend(i for i in bad if i not in hard)
     if drivers is None:
         return fail("INCOMPLETE_FORECAST", "NO_DRIVERS", "ET0/prakiraan belum tersedia.")
-    drivers.r_adj = r_adj_for_model(model, sp, 0.0, None) if model.upper() != "M2" else drivers.r_adj
+    drivers.r_adj = (r_adj_for_model(model, sp, bias if model.upper() == "M1B" else 0.0, None)
+                     if model.upper() != "M2" else drivers.r_adj)
 
     cap = profile.h_cap_cm.value if profile.h_cap_cm.known else None
     mu_d, mu_f = profile.mu_dry.value, profile.mu_fill.value

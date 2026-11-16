@@ -389,13 +389,18 @@ def archive_forecast_run(result: dict) -> tuple:
     return run_id, True
 
 
-def load_forecast_slots(location_id, since_hours=72):
-    """Slot suhu komposit: nilai TERBARU per waktu berlaku dari arsip beberapa penerbitan (untuk hari berjalan)."""
+def load_forecast_slots(location_id, since_hours=72, as_of=None):
+    """Slot suhu komposit dari arsip penerbitan, DIKUNCI pada waktu keputusan (`as_of`, default sekarang): hanya penerbitan yang
+    sudah tersedia saat itu (fetched_at <= as_of dan, bila ada, issued_at <= as_of). Nilai TERBARU yang tersedia per waktu berlaku
+    menang. Tiap baris membawa provenansi penerbitan (run_id, issued_at, fetched_at) agar replay evaluasi historis dapat diaudit.
+    Suhu prakiraan masa lalu yang diarsipkan BUKAN pengamatan suhu."""
+    t = as_utc(as_of) if as_of is not None else now_utc()
     rows = db_query(
         "SELECT DISTINCT ON (v.valid_at) v.valid_at, v.value AS temp, v.run_id, r.issued_at, r.fetched_at "
         "FROM weather_forecast_values v JOIN weather_forecast_runs r ON r.run_id=v.run_id "
         "WHERE r.location_id=%s AND v.variable='temperature_c' AND v.valid_at >= %s "
-        "ORDER BY v.valid_at, r.fetched_at DESC", (location_id, now_utc() - timedelta(hours=since_hours)))
+        "AND r.fetched_at <= %s AND (r.issued_at IS NULL OR r.issued_at <= %s) "
+        "ORDER BY v.valid_at, r.fetched_at DESC, r.run_id DESC", (location_id, t - timedelta(hours=since_hours), t, t))
     return rows
 
 

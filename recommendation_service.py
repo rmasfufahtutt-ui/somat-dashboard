@@ -70,21 +70,44 @@ def phase_breaks(start: datetime, end: datetime, planting: Optional[date], phase
 # ----------------------------------------------------------------------------------------------
 # prakiraan -> ET0 harian
 # ----------------------------------------------------------------------------------------------
-def composite_points(latest_rows: list, archived_slots: list) -> list:
-    """Titik suhu komposit [(waktu lokal berzona, suhu)]. Prakiraan TERBARU menang atas arsip untuk waktu sama;
-    arsip hanya mengisi slot yang sudah lewat (penerbitan baru hanya memuat slot ke depan)."""
-    by_utc = {}
+def composite_with_provenance(latest_rows: list, archived_slots: list, latest_meta: Optional[dict] = None) -> tuple:
+    """-> (titik suhu [(waktu lokal berzona, suhu)], provenansi per slot). Prakiraan TERBARU menang atas arsip untuk waktu sama;
+    arsip mengisi slot yang tidak ada di prakiraan terbaru. Provenansi slot: {valid_at, origin: LATEST|ARCHIVE, run_id,
+    issued_at, fetched_at}. Dipakai agar snapshot menyimpan penerbitan mana yang membentuk tiap slot (komposit lintas penerbitan)."""
+    by_utc, prov = {}, {}
     for a in archived_slots or []:
         v = a.get("temp")
         if v is None:
             continue
         t = a["valid_at"]
         t = t if t.tzinfo else t.replace(tzinfo=timezone.utc)
-        by_utc[t.astimezone(timezone.utc)] = float(v)
+        u = t.astimezone(timezone.utc)
+        by_utc[u] = float(v)
+        prov[u] = {"origin": "ARCHIVE", "run_id": a.get("run_id"), "issued_at": a.get("issued_at"), "fetched_at": a.get("fetched_at")}
+    lm = latest_meta or {}
     for n in et0lib.normalize_forecast_rows(latest_rows or []):
         if n["temp"] is not None:
             by_utc[n["utc"]] = float(n["temp"])
-    return sorted(((u.astimezone(TZ), v) for u, v in by_utc.items()), key=lambda x: x[0])
+            prov[n["utc"]] = {"origin": "LATEST", "run_id": None, "payload_hash": lm.get("payload_hash"),
+                              "issued_at": lm.get("issued_at"), "fetched_at": lm.get("fetched_at")}
+    points = sorted(((u.astimezone(TZ), v) for u, v in by_utc.items()), key=lambda x: x[0])
+    return points, [{"valid_at": u.isoformat(), **prov[u]} for u in sorted(prov)]
+
+
+def summarize_provenance(prov: list) -> list:
+    """Ringkas provenansi slot -> daftar penerbitan yang dipakai + jumlah slot masing-masing (muat di snapshot)."""
+    runs = {}
+    for p in prov:
+        key = (p["origin"], p.get("run_id"), p.get("payload_hash"), str(p.get("issued_at")), str(p.get("fetched_at")))
+        e = runs.setdefault(key, {"origin": p["origin"], "run_id": p.get("run_id"), "payload_hash": p.get("payload_hash"),
+                                  "issued_at": p.get("issued_at"), "fetched_at": p.get("fetched_at"), "n_slots": 0})
+        e["n_slots"] += 1
+    return list(runs.values())
+
+
+def composite_points(latest_rows: list, archived_slots: list) -> list:
+    """Kompatibel ke belakang: hanya titik komposit (tanpa provenansi)."""
+    return composite_with_provenance(latest_rows, archived_slots)[0]
 
 
 def build_drivers(points: list, latitude: Optional[float], kc_by_phase: dict, planting: Optional[date],
@@ -109,7 +132,8 @@ def build_drivers(points: list, latitude: Optional[float], kc_by_phase: dict, pl
 def compute(*, plot: dict, profile: Optional[dict], cycle: Optional[dict], h_obs: Optional[dict],
             points: list, decision_at: datetime, max_h_age_hours: float, inputs_dummy: bool = False,
             forecast_meta: Optional[dict] = None, pe_by_date: Optional[dict] = None, model: Optional[str] = None,
-            ml_residual: Optional[float] = None, bias: float = 0.0, rain_label: Optional[str] = None) -> tuple:
+            ml_residual: Optional[float] = None, bias: float = 0.0, rain_label: Optional[str] = None,
+            bias_info: Optional[dict] = None) -> tuple:
     """-> (output, snapshot). `output` hasil recommend_timed + penjelasan; `snapshot` seluruh input yang dipakai."""
     planting = cycle["planting_date"] if cycle else None
     snap = {
@@ -159,10 +183,14 @@ def compute(*, plot: dict, profile: Optional[dict], cycle: Optional[dict], h_obs
             raise ValueError("residual ML diperlukan untuk M2")
         drivers.r_adj = pe.r_adj_for_model("M2", None, bias, ml_residual)
         snap["ml_residual_mm_day"], snap["bias_mm_day"] = float(ml_residual), float(bias)
+    elif model == "M1B":                 # M1B = SPconstant + bias adaptif (mekanisme bias setara dengan M2)
+        snap["bias_mm_day"] = float(bias)
+    if bias_info is not None:
+        snap["bias_state"] = bias_info
     out = pe.recommend_timed(
         h_obs_cm=h_obs["value"] if h_obs else None, observed_at=observed_at, decision_at=decision_at,
         drivers=drivers, profile=plot_profile, rule_at=rule_at, phase_breaks=breaks, kc_param_at=kc_param_at,
-        model=model, max_h_age_hours=max_h_age_hours, inputs_dummy=inputs_dummy)
+        model=model, max_h_age_hours=max_h_age_hours, inputs_dummy=inputs_dummy, bias=bias)
     out["et0_by_date"] = {str(k): v for k, v in drivers.et0_by_date.items()}
     if rain_label and out.get("rain_scenario") == "NO_RAIN_SCENARIO" and pe_by_date:
         out["rain_scenario"], out["rain_note"] = rain_label, "Hujan efektif per tanggal dari skenario (bukan data BMKG)."
@@ -181,6 +209,10 @@ def _manual(code, reason, decision_at):
 # ----------------------------------------------------------------------------------------------
 # perangkaian dengan repository + hub
 # ----------------------------------------------------------------------------------------------
+def _aware(t):
+    return t if getattr(t, "tzinfo", None) else t.replace(tzinfo=timezone.utc)
+
+
 def gather_inputs(repo, plot_id: str, snapshot, decision_at: datetime) -> dict:
     plot = repo.get_plot(plot_id)
     profile = repo.get_active_profile(plot_id, decision_at)
@@ -188,11 +220,16 @@ def gather_inputs(repo, plot_id: str, snapshot, decision_at: datetime) -> dict:
     h_obs = repo.latest_h(plot_id, decision_at)
     fc = snapshot.forecast if snapshot is not None else None
     loc = (fc or {}).get("adm4")
-    archived = repo.load_forecast_slots(loc) if loc else []
-    points = composite_points((fc or {}).get("rows") or [], archived)
+    # as-of: prakiraan "terbaru" hanya dipakai bila sudah tersedia pada waktu keputusan; untuk replay historis, hanya arsip as-of.
+    fetched = (fc or {}).get("fetched_at")
+    latest_excluded = bool(fc and fetched is not None and _aware(fetched) > _aware(decision_at))
+    latest_rows = [] if latest_excluded else ((fc or {}).get("rows") or [])
+    archived = repo.load_forecast_slots(loc, as_of=decision_at) if loc else []
+    points, prov = composite_with_provenance(latest_rows, archived, fc)
     meta = {"adm4": loc, "payload_hash": (fc or {}).get("payload_hash"),
-            "issued_at": (fc or {}).get("issued_at"), "fetched_at": (fc or {}).get("fetched_at"),
-            "n_points": len(points), "archived_slots": len(archived)}
+            "issued_at": (fc or {}).get("issued_at"), "fetched_at": fetched,
+            "n_points": len(points), "archived_slots": len(archived), "as_of": decision_at,
+            "latest_excluded_not_yet_available": latest_excluded, "slot_runs": summarize_provenance(prov)}
     return {"plot": plot, "profile": profile, "cycle": cycle, "h_obs": h_obs, "points": points,
             "forecast_meta": meta}
 

@@ -63,6 +63,10 @@ def test_full_flow():
     assert r1[1] and not r2[1] and r1[0] == r2[0]
     slots = repo.load_forecast_slots("32.10.15.2003", since_hours=24 * 3650)
     assert len(slots) == 8
+    # as-of (audit K08): penerbitan yang baru diambil NOW tidak boleh terlihat oleh keputusan sebelum NOW
+    assert repo.load_forecast_slots("32.10.15.2003", since_hours=24 * 3650, as_of=NOW - timedelta(hours=1)) == []
+    asof = repo.load_forecast_slots("32.10.15.2003", since_hours=24 * 3650, as_of=NOW + timedelta(hours=1))
+    assert len(asof) == 8 and all(r["run_id"] == r1[0] and r["fetched_at"] is not None for r in asof)
     # rekomendasi + keputusan atomik
     import recommendation_service as rsvc
     class S: max_h_age_hours = 30.0; rec_expiry_hours = 6.0

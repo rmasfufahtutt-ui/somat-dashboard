@@ -470,7 +470,7 @@ def last_sensor_times():
     return out
 
 
-def load_forecast_slots(location_id, since_hours=72):
+def load_forecast_slots(location_id, since_hours=72, as_of=None):
     """Ruang demo tidak mengarsipkan prakiraan BMKG (sumber asli hanya dari data hub)."""
     return []
 

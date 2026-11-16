@@ -258,10 +258,13 @@ def predict_residual(x: dict) -> dict:
 
 
 def compare_models(plot_id: str, decision_at=None, weather=None, bias: float = 0.0, forecast=None) -> dict:
-    """M1 (SPconstant) vs M2 (residual RF + bias) untuk satu petak, di atas input yang SAMA. Tanpa SPconstant ganda."""
+    """M1 (SPconstant), M1B (SPconstant + bias) dan M2 (residual RF + bias) untuk satu petak, di atas input yang SAMA. M1B dan M2 memakai
+    bias yang sama sehingga selisih M1B-M2 hanya berasal dari residual (kontribusi ML), bukan dari koreksi bias. Tanpa SPconstant ganda."""
     import demo_service as ds
     out1, snap1 = ds.compute_for_plot(plot_id, decision_at, weather, model="M1", forecast=forecast)
-    res = {"M1": {"output": out1, "snapshot": snap1}, "M2": None, "notice": NOTICE, "residual": None}
+    out1b, snap1b = ds.compute_for_plot(plot_id, decision_at, weather, model="M1B", bias=bias, forecast=forecast)
+    res = {"M1": {"output": out1, "snapshot": snap1}, "M1B": {"output": out1b, "snapshot": snap1b}, "M2": None,
+           "notice": NOTICE, "residual": None}
     prof = drepo.get_active_profile(plot_id, ds._utc(decision_at or drepo.now_utc()))
     kc = None
     if prof and out1.get("phase_decision"):
