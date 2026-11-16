@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
+import sqlite3
 import threading
 from datetime import date, datetime, timedelta, timezone
 
@@ -405,8 +407,11 @@ def ensure_ready(now=None, train_model=True) -> dict:
     done = []
     with _READY_LOCK, demo_mode.system():
         if not drepo.is_loaded():
-            _write(now, "autoload")
-            done.append("loaded")
+            if load_from_seed(now):
+                done.append("loaded_from_seed")
+            else:
+                _write(now, "autoload")
+                done.append("loaded")
         else:
             a = drepo.get_meta("anchor")
             if a:
@@ -434,3 +439,67 @@ def ensure_ready(now=None, train_model=True) -> dict:
             except Exception:
                 pass
     return {"status": "READY", "actions": done}
+
+
+# ---------------------------------------------------------------------------------------------- berkas seed (data, bukan kode)
+SEED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "demo_seed", "somat_demo_seed.sqlite3")
+
+
+def build_seed(out_path=SEED_FILE, now=None) -> dict:
+    """Bangun berkas seed (jalankan lewat make_demo_seed.py bila skenario/VERSION berubah). Model AI TIDAK disertakan
+    (pickle bergantung versi scikit-learn; dilatih ulang sekali di server, beberapa detik)."""
+    import shutil
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="somat_seed_")
+    work = os.path.join(tmp, "seed.sqlite3")
+    prev = drepo._PATH["p"]
+    drepo.configure(work)
+    try:
+        with demo_mode.system():
+            r = _write(now, "seed")
+        con = sqlite3.connect(work)
+        con.execute("DELETE FROM demo_models") if _has_table(con, "demo_models") else None
+        con.execute("DELETE FROM audit_log") if _has_table(con, "audit_log") else None
+        con.commit()
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.execute("PRAGMA journal_mode=DELETE")
+        con.execute("VACUUM")
+        con.close()
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        shutil.copyfile(work, out_path)
+    finally:
+        drepo.configure(prev)
+        shutil.rmtree(tmp, ignore_errors=True)
+    return {"path": out_path, "bytes": os.path.getsize(out_path), "dataset_id": r["dataset_id"]}
+
+
+def _has_table(con, name) -> bool:
+    return con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
+
+
+def load_from_seed(now=None) -> bool:
+    """Salin berkas seed ke repositori demo lalu geser waktu ke 'sekarang' (tanpa menghitung simulasi). False -> pakai generator."""
+    if not os.path.isfile(SEED_FILE):
+        return False
+    try:
+        src = sqlite3.connect(f"file:{SEED_FILE}?mode=ro&immutable=1", uri=True)
+        try:
+            row = src.execute("SELECT value FROM demo_meta WHERE key='version'").fetchone() if _has_table(src, "demo_meta") else None
+            if not row or row[0] != VERSION:
+                return False
+            drepo.wipe(keep_models=False)           # pastikan skema ada dan kosong
+            dst = drepo._connect()
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        if not drepo.is_loaded():
+            return False
+        drepo.set_meta("seeded_at", datetime.now(timezone.utc).isoformat())
+        _shift(now)
+        drepo.audit("demo_autoload", "dari berkas seed", "system")
+        return True
+    except Exception:
+        return False

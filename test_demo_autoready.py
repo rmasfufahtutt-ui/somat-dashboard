@@ -19,7 +19,7 @@ def fresh(tmp_path):
 
 def test_empty_space_fills_itself_even_for_viewer(fresh):
     r = demo_data.ensure_ready(train_model=False)
-    assert "loaded" in r["actions"]
+    assert any(a.startswith("loaded") for a in r["actions"])
     assert len(drepo.list_plots()) == 6
     pend = {p["plot_id"]: p for p in drepo.list_pending_runs()}
     assert set(pend) == {"DEMO-P01", "DEMO-P03"}
@@ -44,3 +44,19 @@ def test_user_actions_still_need_admin(fresh):
     demo_data.ensure_ready(train_model=False)
     with pytest.raises(PermissionError):
         demo_data.clear()
+
+
+def test_loads_from_seed_file_without_simulation(fresh, monkeypatch):
+    """Data demo datang dari berkas seed (data), bukan dihitung ulang saat halaman dibuka."""
+    import os
+    assert os.path.isfile(demo_data.SEED_FILE)
+    monkeypatch.setattr(demo_data, "_write", lambda *a, **k: (_ for _ in ()).throw(AssertionError("simulasi tidak boleh jalan")))
+    r = demo_data.ensure_ready(train_model=False)
+    assert "loaded_from_seed" in r["actions"]
+    assert len(drepo.list_plots()) == 6
+    assert drepo.dataset_id()
+
+
+def test_seed_version_mismatch_falls_back_to_generator(fresh, monkeypatch):
+    monkeypatch.setattr(demo_data, "VERSION", "demo-data-OTHER")
+    assert demo_data.load_from_seed() is False
