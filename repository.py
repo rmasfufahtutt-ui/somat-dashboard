@@ -300,11 +300,14 @@ def last_sensor_times():
     return {r["sensor_id"]: r["last"] for r in rows}
 
 
-def archive_sensor_rows(df: pd.DataFrame, since: dict | None = None) -> int:
-    """Simpan pembacaan sensor baru (idempoten via ext_key). `since` {sensor_id: waktu UTC terakhir terarsip}
-    membatasi baris yang dikirim. Mengembalikan jumlah baris yang dikirim ke DB."""
+def build_sensor_archive_rows(df: pd.DataFrame, since: dict | None = None) -> list:
+    """Baris siap-simpan (tanpa DB). QC dijalankan pada SELURUH jendela yang diterima (agar tetangga tersedia), lalu hanya baris baru
+    yang dikirim. quality_flag = status perangkat bila bukan OK, selain itu flag QC; kode dan tindakan QC masuk meta. Nilai mentah
+    TIDAK diubah. Catatan: baris disimpan idempoten (ext_key), jadi titik paling akhir saat pertama masuk belum bisa dinilai spike."""
     if df is None or df.empty:
-        return 0
+        return []
+    import sensor_qc
+    df = sensor_qc.assess(df)
     rows = []
     since = since or {}
     for r in df.itertuples(index=False):
@@ -313,11 +316,21 @@ def archive_sensor_rows(df: pd.DataFrame, since: dict | None = None) -> int:
         if last is not None and obs_utc <= last:
             continue
         value = None if pd.isna(r.value) else float(r.value)
-        flag = str(r.status or "OK")
+        flag = sensor_qc.combine_flag(r.status, r.qc_flag)
         rows.append((None, r.sensor_id, r.sensor_type, value, r.unit or "", obs_utc, "sensor-sheet",
                      r.source_type, flag, f"{r.source_type}:{r.sensor_id}:{obs_utc.isoformat()}",
                      J({"location": r.location, "measurement_mode": r.measurement_mode,
-                        "device_id": r.device_id, "sequence": r.sequence})))
+                        "device_id": r.device_id, "sequence": r.sequence,
+                        "qc_codes": r.qc_codes, "qc_action": r.qc_action})))
+    return rows
+
+
+def archive_sensor_rows(df: pd.DataFrame, since: dict | None = None) -> int:
+    """Simpan pembacaan sensor baru (idempoten via ext_key). `since` {sensor_id: waktu UTC terakhir terarsip}
+    membatasi baris yang dikirim. Mengembalikan jumlah baris yang dikirim ke DB."""
+    rows = build_sensor_archive_rows(df, since)
+    if not rows:
+        return 0
     return db.execute_values(
         "INSERT INTO observations (plot_id, sensor_id, variable, value, unit, observed_at, recorded_by, source_type, "
         "quality_flag, ext_key, meta) VALUES %s ON CONFLICT (ext_key) WHERE ext_key IS NOT NULL DO NOTHING", rows)

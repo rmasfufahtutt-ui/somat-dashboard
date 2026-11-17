@@ -6,8 +6,43 @@ import streamlit as st
 
 from i18n import L
 from ui_kit import cards, line_by_sensor, make_line_chart, memo_fig, plot, sensor_donut, table
+import sensor_qc
 from views import bmkg_panels
 from views.overview import mode_banner
+
+
+_ACTION_TXT = {"USE": ("Use", "Dipakai"), "USE_WITH_WARNING": ("Use with warning", "Dipakai dengan peringatan"),
+               "EXCLUDE_FROM_AUTOMATIC_USE": ("Excluded from automatic use", "Tidak dipakai otomatis")}
+
+
+def _qc_panel(d):
+    """Ringkasan QC: per sensor, kode flag dan tindakannya. Nilai mentah tidak diubah; flag hanya menentukan pemakaian."""
+    with st.expander(L("Data quality checks (QC)", "Pemeriksaan kualitas data (QC)")):
+        df = d.sensor_df
+        if df is None or df.empty or not d.sensors:
+            st.caption(L("No sensor data to check yet.", "Belum ada data sensor untuk diperiksa."))
+            return
+        now = pd.Timestamp.now(tz="Asia/Jakarta").tz_localize(None)
+        rep = sensor_qc.coverage_report(sensor_qc.assess(df), d.sensors, now)
+        lang = "en" if L("en", "id") == "en" else "id"   # L() memilih teks sesuai bahasa aktif
+        idx = 0 if lang == "en" else 1
+        rows = []
+        for r in rep.itertuples(index=False):
+            rows.append({
+                L("Sensor", "Sensor"): r.sensor_id,
+                L("Coverage 24 h", "Cakupan 24 j"): f"{100 * r.coverage:.0f}%",
+                L("Last valid (h ago)", "Valid terakhir (jam lalu)"): "—" if pd.isna(r.age_hours) else f"{r.age_hours:.1f}",
+                L("Suspect / bad", "Mencurigakan / buruk"): f"{r.n_suspect} / {r.n_bad}",
+                L("Findings", "Temuan"): "; ".join(sensor_qc.describe(c, lang) for c in r.codes.split(",") if c) or "—",
+                L("Action", "Tindakan"): _ACTION_TXT[r.action][idx],
+            })
+        table(pd.DataFrame(rows), key="sensor_qc")
+        st.caption(L("Flags never change or delete raw readings; they only decide how a reading may be used. "
+                     "Range limits are generic physical bounds, to be confirmed per device. Isolated jumps are flagged only when "
+                     "readings exist on both sides.",
+                     "Flag tidak mengubah atau menghapus pembacaan mentah; hanya menentukan bagaimana pembacaan boleh dipakai. "
+                     "Batas rentang adalah batas fisik generik yang perlu dikonfirmasi per perangkat. Lonjakan terisolasi hanya "
+                     "ditandai bila ada pembacaan di kedua sisi."))
 
 
 def render(ctx):
@@ -48,6 +83,7 @@ def render(ctx):
             sm, L("Soil Moisture Trend per Sensor (7 days)", "Tren Kelembapan per Sensor (7 hari)"),
             L("Soil moisture (%)", "Kelembapan tanah (%)"))), key="mon_trend")
     table(tbl, key="sensor_status")
+    _qc_panel(d)
     st.divider()
 
     st.header("Monitoring")
