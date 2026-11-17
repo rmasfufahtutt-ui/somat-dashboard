@@ -56,6 +56,19 @@ def test_train_reports_test_metrics_and_notice(trained):
     assert ml.status()["trained"] is True and ml.status()["model_id"] == trained["model_id"]
 
 
+def test_train_reports_physical_unit_eval_with_skill(trained):
+    e = trained["metrics"]["eval"]
+    assert e["reference"] == "M1"
+    for tgt in ("residual_mm_day", "h_end_cm"):
+        for mod in ("M1", "M2"):
+            x = e[tgt][mod]
+            assert x["n"] == trained["metrics"]["test"]["n"] and x["mae"] >= 0 and x["rmse"] >= x["mae"] - 1e-9 and x["bias"] is not None
+        sk = e[tgt]["skill_rmse_M2"]
+        assert sk is None or sk <= 1.0
+    # konsisten dengan angka lama
+    assert e["residual_mm_day"]["M2"]["mae"] == pytest.approx(trained["metrics"]["test"]["M2"]["mae_residual"])
+
+
 def test_m2_does_not_double_count_spconstant(trained, demo):
     from datetime import timezone
     now = drepo.now_utc()

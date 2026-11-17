@@ -12,6 +12,7 @@ import pandas as pd
 
 import legacy_prototype as lp
 import sensor_logic as sl
+import sensor_qc
 
 _LOCK = threading.Lock()
 _MEMO: dict = {}
@@ -45,6 +46,7 @@ class Derived:
     n_online: int = 0
     n_total: int = 0
     source_types: list = field(default_factory=list)
+    n_qc_excluded: int = 0          # pembacaan OK yang dikeluarkan dari perhitungan otomatis oleh QC (nilai mentah tetap ada)
 
     @property
     def is_real(self) -> bool:
@@ -79,16 +81,19 @@ def compute(snap) -> Derived:
     src = snap.source("sensor")
     live = snap.sensor_df is not None and not snap.sensor_df.empty
     if live:
-        sensor_df = snap.sensor_df
+        sensor_df = snap.sensor_df                       # mentah, untuk tampilan
+        gated, n_qc_excluded = sensor_qc.gate_for_decisions(sensor_df)   # untuk perhitungan otomatis
         cfg = _sensors_from_config((snap.sensor_meta or {}).get("sensors"))
         sensors = cfg or _sensors_from_df(sensor_df)
-        summary = sl.summarize_sensors(sensor_df, sensor_config=(snap.sensor_meta or {}).get("sensors"),
+        summary = sl.summarize_sensors(gated, sensor_config=(snap.sensor_meta or {}).get("sensors"),
                                        fallback_summary=sim["summary"])
-        daily = sl.build_sensor_daily_history(sensor_df, fallback_sensor_df=sim["sensor_df"], days=14)
+        daily = sl.build_sensor_daily_history(gated, fallback_sensor_df=sim["sensor_df"], days=14)
         mode = "CACHED_DB" if src.origin == "db_cache" else "LIVE"
     else:
-        sensor_df, sensors = sim["sensor_df"], [dict(s, expected_interval_min=30, offline_after_min=180,
-                                                   measurement_mode="instantaneous") for s in lp.SENSORS]
+        n_qc_excluded = 0
+        gated = sensor_df = sim["sensor_df"]
+        sensors = [dict(s, expected_interval_min=30, offline_after_min=180, measurement_mode="instantaneous")
+                   for s in lp.SENSORS]
         summary = sim["summary"]
         daily = sl.build_sensor_daily_history(sensor_df, days=14)
         if src.configured and src.ok:
@@ -97,7 +102,7 @@ def compute(snap) -> Derived:
             mode = "SIMULATION_FALLBACK"
         else:
             mode = "SIMULATION"
-    table = sl.sensor_status_table(sensor_df, sensors)
+    table = sl.sensor_status_table(gated, sensors)
     model_df = sim["df"]
     latest = model_df.iloc[-1].copy()
     for k in ("soil_moisture", "water_level", "rainfall"):
@@ -119,7 +124,7 @@ def compute(snap) -> Derived:
                    sensor_daily=daily, sensor_table=table, model_df=model_df, latest=latest.to_dict(),
                    prediction=pred, hydraulic=hyd, recommendation=rec, alerts=alerts,
                    system_status="ATTENTION" if (alerts or not hyd["feasible"]) else "NORMAL",
-                   n_online=n_on, n_total=len(table), source_types=types)
+                   n_online=n_on, n_total=len(table), source_types=types, n_qc_excluded=n_qc_excluded)
 
 
 def get(snap) -> Derived:

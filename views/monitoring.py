@@ -37,6 +37,12 @@ def _qc_panel(d):
                 L("Action", "Tindakan"): _ACTION_TXT[r.action][idx],
             })
         table(pd.DataFrame(rows), key="sensor_qc")
+        n_ex = int(getattr(d, "n_qc_excluded", 0) or 0)
+        if n_ex:
+            st.warning(L(f"{n_ex} reading(s) are excluded from automatic calculations (summary, trends, sensor status). "
+                         "Raw values are kept.",
+                         f"{n_ex} pembacaan dikeluarkan dari perhitungan otomatis (ringkasan, tren, status sensor). "
+                         "Nilai mentah tetap tersimpan."))
         st.caption(L("Flags never change or delete raw readings; they only decide how a reading may be used. "
                      "Range limits are generic physical bounds, to be confirmed per device. Isolated jumps are flagged only when "
                      "readings exist on both sides.",

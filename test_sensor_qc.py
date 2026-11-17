@@ -149,3 +149,62 @@ def test_archive_rows_keep_device_error_status_and_respect_since(monkeypatch):
     first = repo.as_utc(T0)
     assert len(repo.build_sensor_archive_rows(_archive_frame([40.0, 41.0, 42.0]), {"SM-01": first})) == 2
     assert repo.build_sensor_archive_rows(None) == [] and repo.build_sensor_archive_rows(frame([])) == []
+
+
+# ------------------------------------------------------------------ QC -> keputusan otomatis (derive/sensor_logic)
+def _live(vals, sid="SM-01", stype="soil_moisture", end=None):
+    end = end or pd.Timestamp.now(tz="Asia/Jakarta").tz_localize(None).floor("min")
+    n = len(vals)
+    return pd.DataFrame({"timestamp": [end - pd.Timedelta(minutes=30 * (n - 1 - i)) for i in range(n)], "sensor_id": sid,
+                         "sensor_type": stype, "location": "P1", "value": vals, "unit": "%", "status": "OK",
+                         "measurement_mode": "auto", "device_id": "d", "sequence": 1, "source_type": "SENSOR"})
+
+
+def test_gate_excludes_bad_points_but_keeps_raw_values_and_original_df():
+    df = _live([40.0, 41.0, 40.5, 150.0])
+    g, n = qc.gate_for_decisions(df)
+    assert n == 1 and g["status"].tolist() == ["OK", "OK", "OK", "QC_EXCLUDED"] and g["value"].tolist() == df["value"].tolist()
+    assert df["status"].tolist() == ["OK"] * 4                           # df asli tidak berubah
+    assert qc.gate_for_decisions(df.iloc[0:0])[1] == 0 and qc.gate_for_decisions(None) == (None, 0)
+
+
+def test_warning_only_flags_stay_in_automatic_use():
+    g, n = qc.gate_for_decisions(_live([42.0] * 14))                     # FLATLINE = USE_WITH_WARNING
+    assert n == 0 and set(g["status"]) == {"OK"}
+
+
+def test_device_error_status_is_not_relabelled():
+    df = _live([40.0, 41.0, 150.0])
+    df.loc[2, "status"] = "ERROR"
+    g, n = qc.gate_for_decisions(df)
+    assert n == 0 and g["status"].tolist() == ["OK", "OK", "ERROR"]
+
+
+def test_summary_ignores_out_of_range_latest_reading():
+    import sensor_logic as sl
+    df = _live([40.0, 41.0, 40.5, 150.0])
+    raw = sl.summarize_sensors(df)
+    gated = sl.summarize_sensors(qc.gate_for_decisions(df)[0])
+    assert raw["soil_moisture"] == pytest.approx(150.0)                  # tanpa QC angka ngawur ikut keputusan
+    assert gated["soil_moisture"] == pytest.approx(40.5)                 # dengan QC memakai pembacaan sah terbaru
+
+
+def test_status_table_uses_gated_frame():
+    import sensor_logic as sl
+    df = _live([150.0, 150.0])                                           # semua pembacaan di luar rentang
+    sensors = [dict(sensor_id="SM-01", sensor_type="soil_moisture", location="P1", expected_interval_min=30, offline_after_min=180)]
+    assert sl.sensor_status_table(df, sensors).loc[0, "Status"] == "Online"
+    assert sl.sensor_status_table(qc.gate_for_decisions(df)[0], sensors).loc[0, "Status"] == "Offline"
+
+
+def test_derive_compute_uses_gate_and_exposes_count(monkeypatch):
+    import types
+    import derive
+    df = _live([40.0, 41.0, 40.5, 150.0])
+    src = types.SimpleNamespace(origin="live", configured=True, ok=True, attempted_at=None)
+    snap = types.SimpleNamespace(version=1, sensor_df=df, sensor_meta={"sensors": [
+        dict(sensor_id="SM-01", sensor_type="soil_moisture", location="P1", expected_interval_min=30, offline_after_min=180)]},
+        source=lambda name: src)
+    d = derive.compute(snap)
+    assert d.n_qc_excluded == 1 and d.sensor_summary["soil_moisture"] == pytest.approx(40.5)
+    assert d.sensor_df["value"].tolist()[-1] == 150.0                    # tampilan mentah tetap

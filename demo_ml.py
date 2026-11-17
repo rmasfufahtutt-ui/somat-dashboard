@@ -24,6 +24,7 @@ import demo_repository as drepo
 import demo_weather as dw
 import et0 as et0lib
 import labels as lb
+import evaluation as ev
 import ml_features as mf
 import physics_engine as pe
 
@@ -197,6 +198,16 @@ def train(actor: str | None = None, seed: int = 42, _internal: bool = False) -> 
         "M1": _mae(obs_end, [_h_end_pred(l, SP_CONSTANT) for l in sp["test"]]),
         "M2": _mae(obs_end, [_h_end_pred(l, p) for l, p in zip(sp["test"], p_te)])}
     metrics["h_end_mae_cm"]["n"] = len(obs_end)
+    # evaluasi dalam satuan fisik (modul evaluation): MAE/RMSE/bias dan skill terhadap M1 pada sampel uji yang IDENTIK.
+    # M1B tidak disimulasikan di demo (tidak ada aliran label berurutan), jadi pembanding di sini M1.
+    h1 = [_h_end_pred(l, SP_CONSTANT) for l in sp["test"]]
+    h2 = [_h_end_pred(l, p) for l, p in zip(sp["test"], p_te)]
+    ev_r1, ev_r2 = ev.error_metrics(list(zip(m1, yte))), ev.error_metrics(list(zip(p_te, yte)))
+    ev_h1, ev_h2 = ev.error_metrics(list(zip(h1, obs_end))), ev.error_metrics(list(zip(h2, obs_end)))
+    metrics["eval"] = {"reference": "M1",
+                       "residual_mm_day": {"M1": ev_r1, "M2": ev_r2, "skill_rmse_M2": ev.skill_score(ev_r2["rmse"], ev_r1["rmse"])},
+                       "h_end_cm": {"M1": ev_h1, "M2": ev_h2, "skill_rmse_M2": ev.skill_score(ev_h2["rmse"], ev_h1["rmse"])}}
+    # RINGKASAN hasil uji, BUKAN gerbang pemilihan model (pemilihan hiperparameter sudah selesai pada set validasi).
     metrics["better_on_test"] = "M2" if metrics["test"]["M2"]["mae_residual"] < metrics["test"]["M1"]["mae_residual"] else "M1"
     metrics["notice"] = NOTICE
     blob = pickle.dumps(model)

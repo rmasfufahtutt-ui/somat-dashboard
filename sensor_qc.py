@@ -127,6 +127,19 @@ def combine_flag(device_status, qc_flag: str) -> str:
     return qc_flag
 
 
+def gate_for_decisions(df: pd.DataFrame, rules: Optional[dict] = None) -> tuple:
+    """Salinan df untuk PERHITUNGAN OTOMATIS: baris berstatus OK yang tindakan QC-nya EXCLUDE_FROM_AUTOMATIC_USE diberi status
+    "QC_EXCLUDED" sehingga tidak dihitung sebagai pembacaan valid (ringkasan, kualitas data, tren harian, status sensor). Nilai mentah
+    tetap utuh dan df asli tidak diubah (tampilan mentah memakai df asli). -> (df_terseleksi, jumlah_baris_dikecualikan)."""
+    if df is None or df.empty:
+        return df, 0
+    a = assess(df, rules)
+    ex = (a["qc_action"] == "EXCLUDE_FROM_AUTOMATIC_USE") & (a["status"].fillna("").astype(str).str.upper() == "OK")
+    out = df.copy().reset_index(drop=True)
+    out.loc[ex.values, "status"] = "QC_EXCLUDED"
+    return out, int(ex.sum())
+
+
 def coverage_report(df: pd.DataFrame, sensors: list, now: pd.Timestamp, window_hours: float = 24.0,
                     min_coverage: float = 0.5) -> pd.DataFrame:
     """Per sensor: n_valid, n_expected, coverage, umur bacaan valid terakhir, kode tingkat-sensor dan tindakannya.

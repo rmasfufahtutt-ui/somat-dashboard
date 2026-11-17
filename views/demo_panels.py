@@ -276,6 +276,25 @@ def _training_details(status: dict, m: dict):
     st.caption(L("Hyperparameters were chosen on the validation set; the test set is used once for reporting.",
                  "Hiperparameter dipilih pada set validasi; set uji dipakai sekali untuk laporan."))
 
+    e = (m.get("eval") or {})
+    if e:
+        st.markdown("**" + L("Test-set errors (physical units)", "Galat set uji (satuan fisik)") + "**")
+        rows = []
+        for tgt, unit, name in (("residual_mm_day", "mm/day", L("Residual", "Residual")), ("h_end_cm", "cm", L("Final water level h", "h akhir jendela"))):
+            blk = e.get(tgt) or {}
+            for mod in ("M1", "M2"):
+                x = blk.get(mod) or {}
+                sk = blk.get("skill_rmse_M2") if mod == "M2" else None
+                rows.append({L("Target", "Target"): f"{name} ({unit})", L("Model", "Model"): mod, "n": x.get("n", "-"),
+                             "MAE": "-" if x.get("mae") is None else f"{x['mae']:.2f}", "RMSE": "-" if x.get("rmse") is None else f"{x['rmse']:.2f}",
+                             L("Bias", "Bias"): "-" if x.get("bias") is None else f"{x['bias']:+.2f}",
+                             L("Skill vs M1", "Skill vs M1"): "—" if sk is None else f"{sk:+.2f}"})
+        table(rows, key="demo_train_eval")
+        st.caption(L("Skill = 1 − RMSE(M2)/RMSE(M1) on the identical test sample (positive = better). M1B is not simulated in the demo. "
+                     "Bias is in physical units (prediction − observation).",
+                     "Skill = 1 − RMSE(M2)/RMSE(M1) pada sampel uji yang identik (positif = lebih baik). M1B tidak disimulasikan di demo. "
+                     "Bias dalam satuan fisik (prediksi − pengamatan)."))
+
     st.markdown("**" + L("Chosen hyperparameters", "Hiperparameter terpilih") + "**")
     table([{L("Parameter", "Parameter"): "max_depth", L("Value", "Nilai"): ch.get("max_depth", "-")},
            {L("Parameter", "Parameter"): "min_samples_leaf", L("Value", "Nilai"): ch.get("min_samples_leaf", "-")},
