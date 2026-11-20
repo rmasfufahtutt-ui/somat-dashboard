@@ -33,7 +33,8 @@ def weather_points(weather: dict, decision_at: datetime, observed_at: Optional[d
 
 def compute_pure(plot: dict, profile: Optional[dict], cycle: Optional[dict], h_obs: Optional[dict], decision_at: datetime,
                  weather: Optional[dict] = None, *, forecast: Optional[dict] = None, max_h_age_hours: float = 30.0,
-                 model: str = "M1", ml_residual: Optional[float] = None, bias: float = 0.0) -> tuple:
+                 model: str = "M1", ml_residual: Optional[float] = None, bias: float = 0.0,
+                 since_obs: Optional[dict] = None) -> tuple:
     """Perhitungan murni (tanpa DB). -> (output, snapshot) dengan snapshot bertanda is_demo=True."""
     w = {**DEFAULT_WEATHER, **(weather or {})}
     decision_at = _utc(decision_at)
@@ -43,7 +44,7 @@ def compute_pure(plot: dict, profile: Optional[dict], cycle: Optional[dict], h_o
     out, snap = rs.compute(plot=plot, profile=profile, cycle=cycle, h_obs=h_obs, points=points, decision_at=decision_at,
                            max_h_age_hours=max_h_age_hours, inputs_dummy=True, forecast_meta=meta,
                            pe_by_date=pe_by_date, model=model, ml_residual=ml_residual, bias=bias,
-                           rain_label=f"SYNTHETIC_RAIN:{w['rain']}")
+                           rain_label=f"SYNTHETIC_RAIN:{w['rain']}", since_obs=since_obs)
     out["run_mode"] = "DEMO" if out.get("run_mode") != "MANUAL_REQUIRED" else "MANUAL_REQUIRED"
     snap.update(is_demo=True, run_label="DEMO", weather=meta, rain_kind=w["rain"], weather_driver=w["driver"])
     out["weather"] = meta
@@ -56,8 +57,10 @@ def _expires(decision_at, hours=6.0):
 
 
 def gather(plot_id: str, decision_at: datetime) -> dict:
+    h_obs = drepo.latest_h(plot_id, decision_at)
+    since = rs.events_since_observation(drepo, plot_id, h_obs["observed_at"], decision_at) if h_obs else None
     return {"plot": drepo.get_plot(plot_id), "profile": drepo.get_active_profile(plot_id, decision_at),
-            "cycle": drepo.get_active_cycle(plot_id), "h_obs": drepo.latest_h(plot_id, decision_at)}
+            "cycle": drepo.get_active_cycle(plot_id), "h_obs": h_obs, "since_obs": since}
 
 
 def compute_for_plot(plot_id: str, decision_at: Optional[datetime] = None, weather: Optional[dict] = None, *,
@@ -68,7 +71,8 @@ def compute_for_plot(plot_id: str, decision_at: Optional[datetime] = None, weath
     if g["plot"] is None:
         raise ValueError(f"petak demo tidak ditemukan: {plot_id}")
     return compute_pure(g["plot"], g["profile"], g["cycle"], g["h_obs"], decision_at, weather, forecast=forecast,
-                        max_h_age_hours=max_h_age_hours, model=model, ml_residual=ml_residual, bias=bias)
+                        max_h_age_hours=max_h_age_hours, model=model, ml_residual=ml_residual, bias=bias,
+                        since_obs=g["since_obs"])
 
 
 def publish(plot_id: str, actor: str, decision_at: Optional[datetime] = None, weather: Optional[dict] = None, *,

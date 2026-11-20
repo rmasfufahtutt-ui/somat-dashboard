@@ -8,6 +8,8 @@ Prinsip:
         EXCLUDE_FROM_AUTOMATIC_USE  tidak dipakai dalam agregat/keputusan otomatis; tetap tampil dan dapat ditinjau
   * Ambang bawaan adalah batas FISIK GENERIK (bukan hasil kalibrasi perangkat); konfirmasi per perangkat sebelum dipakai di
     penelitian. Jenis tanpa batas yang pasti (mis. muka air saluran, datum/satuan belum ditetapkan) TIDAK diberi batas rentang.
+  * QC berversi (H07): assess() = penilaian RETROSPEKTIF (memakai seluruh jendela, termasuk tetangga masa depan); assess_asof() =
+    penilaian ONLINE (hanya informasi yang ada saat titik tiba). Hasil disimpan terpisah dari nilai mentah (tabel observation_qc).
   * Spike hanya dinilai untuk titik yang punya tetangga sebelum dan sesudah dalam celah waktu wajar; titik paling akhir tidak
     dapat diklasifikasi sebagai spike (belum ada pembanding) dan dibiarkan OK.
 """
@@ -106,16 +108,58 @@ def assess(df: pd.DataFrame, rules: Optional[dict] = None) -> pd.DataFrame:
                         for m in range(k, j + 1):
                             codes[order[m]].append("FLATLINE")
                     k = j + 1
-    flags, acts, joined = [], [], []
-    for c in codes:
-        flag = max((CODES[x][0] for x in c), key=lambda f: FLAG_ORDER[f], default="OK")
-        act = "EXCLUDE_FROM_AUTOMATIC_USE" if any(CODES[x][1] == "EXCLUDE_FROM_AUTOMATIC_USE" for x in c) else \
-            ("USE_WITH_WARNING" if c else "USE")
-        flags.append(flag)
-        acts.append(act)
-        joined.append(",".join(dict.fromkeys(c)))
+    flags, acts, joined = _summarize(codes)
     out["qc_flag"], out["qc_action"], out["qc_codes"] = flags, acts, joined
     return out
+
+
+def rule_version(rules: Optional[dict] = None) -> str:
+    """Versi aturan QC yang turun otomatis dari isi aturan: mengubah ambang mengubah versi (jejak audit H07)."""
+    import hashlib
+    rules = rules or DEFAULT_RULES
+    canon = repr(sorted((k, (v.lo, v.hi, v.max_jump, v.max_gap_h, v.flat_n, v.flat_hours)) for k, v in rules.items()))
+    return "qc-" + hashlib.sha256(canon.encode()).hexdigest()[:10]
+
+
+def assess_asof(df: pd.DataFrame, rules: Optional[dict] = None) -> pd.DataFrame:
+    """QC ONLINE: tiap titik dinilai HANYA dengan informasi yang sudah ada saat titik itu tiba (titik itu dan sebelumnya).
+    Pemeriksaan yang butuh tetangga masa depan (SPIKE) tidak dapat dinilai: titik tetap OK sampai QC retrospektif.
+    FLATLINE dinilai atas urutan identik yang BERAKHIR di titik itu. Kolom keluaran sama dengan assess()."""
+    rules = rules or DEFAULT_RULES
+    out = df.copy().reset_index(drop=True)
+    codes = [[] for _ in range(len(out))]
+    if len(out):
+        ts = pd.to_datetime(out["timestamp"], errors="coerce")
+        for (sid, stype), idx in out.groupby(["sensor_id", "sensor_type"], sort=False).groups.items():
+            rule = rules.get(stype)
+            order = sorted(idx, key=lambda i: (ts.iloc[i] if pd.notna(ts.iloc[i]) else pd.Timestamp.max))
+            vals = [out["value"].iloc[i] for i in order]
+            tms = [ts.iloc[i] for i in order]
+            run_start = 0
+            for k, i in enumerate(order):
+                if not _is_num(vals[k]):
+                    codes[i].append("NO_VALUE")
+                elif rule and ((rule.lo is not None and vals[k] < rule.lo) or (rule.hi is not None and vals[k] > rule.hi)):
+                    codes[i].append("OUT_OF_RANGE")
+                if k == 0 or not (_is_num(vals[k]) and _is_num(vals[k - 1]) and vals[k] == vals[k - 1]):
+                    run_start = k
+                if rule and rule.flat_n and _is_num(vals[k]) and (k - run_start + 1) >= rule.flat_n \
+                        and pd.notna(tms[k]) and pd.notna(tms[run_start]) \
+                        and (tms[k] - tms[run_start]).total_seconds() / 3600 >= rule.flat_hours:
+                    codes[i].append("FLATLINE")
+    flags, acts, joined = _summarize(codes)
+    out["qc_flag"], out["qc_action"], out["qc_codes"] = flags, acts, joined
+    return out
+
+
+def _summarize(codes: list) -> tuple:
+    flags, acts, joined = [], [], []
+    for c in codes:
+        flags.append(max((CODES[x][0] for x in c), key=lambda f: FLAG_ORDER[f], default="OK"))
+        acts.append("EXCLUDE_FROM_AUTOMATIC_USE" if any(CODES[x][1] == "EXCLUDE_FROM_AUTOMATIC_USE" for x in c) else
+                    ("USE_WITH_WARNING" if c else "USE"))
+        joined.append(",".join(dict.fromkeys(c)))
+    return flags, acts, joined
 
 
 def combine_flag(device_status, qc_flag: str) -> str:

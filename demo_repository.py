@@ -484,6 +484,15 @@ def _needs_recalc(con, run):
     return bool(newest and snap_obs is not None and int(newest["obs_id"]) != int(snap_obs))
 
 
+def _profile_changed(con, run):
+    """True bila profil parameter aktif petak sudah berbeda dari profil yang dipakai rekomendasi (H13)."""
+    if run.get("profile_id") is None:
+        return False
+    cur = con.execute("SELECT profile_id FROM plot_profile_versions WHERE plot_id=? AND effective_to IS NULL "
+                      "ORDER BY version DESC LIMIT 1", (run["plot_id"],)).fetchone()
+    return bool(cur and int(cur["profile_id"]) != int(run["profile_id"]))
+
+
 def publish_recommendation(plot_id, created_by, decision_at, snapshot, profile_id, model_version, run_mode,
                            status_code, output, expires_at, origin="USER"):
     """JALUR PENERBITAN KHUSUS DEMO. Menolak run operasional dan snapshot tanpa penanda is_demo."""
@@ -555,6 +564,8 @@ def record_decision(rec_id, user, decision, operator_mm, duration_h, note, idemp
             raise DecisionError("expired")
         if run["run_mode"] != "DEMO" or not (run["inputs_snapshot"] or {}).get("is_demo"):
             raise DecisionError("not_demo", run_mode=run["run_mode"])
+        if _profile_changed(con, run):
+            raise DecisionError("profile_changed")
         if _needs_recalc(con, run):
             raise DecisionError("inputs_changed")
         out = run["output"] or {}

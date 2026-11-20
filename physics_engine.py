@@ -418,6 +418,31 @@ def classify_run_mode(status: str, parameter_status: dict, validation_status: st
     return "BASELINE_PROVISIONAL"
 
 
+# Otorisasi keputusan = DAFTAR YANG DIIZINKAN. "Bukan DEMO" saja tidak cukup; semua syarat berikut harus lolos.
+# ML_SHADOW tidak mengotorisasi keluaran ML: keputusan merujuk rekomendasi baseline.
+OPERATIONAL_RUN_MODES = OPERATIONAL_MODES                 # satu daftar izin (didefinisikan di atas)
+DECIDABLE_STATUS_CODES = ("OK", "TARGET_NOT_REACHABLE")
+
+
+def decision_blockers(*, run_mode, status_code, expired: bool = False, inputs_changed: bool = False,
+                      profile_changed: bool = False) -> list:
+    """Kode penghalang keputusan operasional, berurutan menurut keparahan; daftar kosong = boleh diputuskan.
+    Mode sesuai, status hasil layak, rekomendasi belum kedaluwarsa, versi pengamatan/profil masih berlaku.
+    (Status klaim dan hak pengguna diperiksa terpisah oleh pemanggil.)"""
+    out = []
+    if expired:
+        out.append("expired")
+    if run_mode not in OPERATIONAL_RUN_MODES:
+        out.append("not_operational")
+    if status_code not in DECIDABLE_STATUS_CODES:
+        out.append("not_decidable_status")
+    if profile_changed:
+        out.append("profile_changed")
+    if inputs_changed:
+        out.append("inputs_changed")
+    return out
+
+
 @dataclass
 class Drivers:
     """Pemaksa neraca per tanggal lokal. None = tidak tersedia (INCOMPLETE_FORECAST)."""
@@ -443,10 +468,15 @@ def recommend_timed(*, h_obs_cm: Optional[float], observed_at: Optional[datetime
                     drivers: Optional[Drivers], profile: PlotProfile, rule_at: Callable,
                     phase_breaks=(), kc_param_at: Optional[Callable] = None, model: str = "M1",
                     max_h_age_hours: float = 30.0, inputs_dummy: bool = False, q_plot_m3s: Optional[float] = None,
-                    bias: float = 0.0) -> dict:
+                    bias: float = 0.0, since_obs: Optional[dict] = None, rain_block_mm: float = 0.0) -> dict:
     """Rekomendasi per petak dengan selang waktu eksplisit. `bias` hanya dipakai M1B (SPconstant + b); M1/M0 mengabaikannya; M2 membawa R_adj sendiri.
 
     * Kondisi h diperambat dari observed_at ke decision_at (selang pengamatan), lalu ke arrival_at = decision_at + L.
+    * `since_obs` = kejadian AKTUAL yang diketahui pada waktu keputusan sejak h dibaca:
+      {"irrigation_events": n, "irrigation_decided": n, "rain_mm": float | None (None = tidak diketahui)}.
+      Irigasi (diputuskan/dilaksanakan) atau hujan terukur > rain_block_mm [PILOT] mengubah keadaan petak dengan cara yang
+      tidak direkonstruksi di sini -> STATE_NOT_RECONSTRUCTABLE (minta h baru). Hujan tidak diketahui TIDAK dianggap nol:
+      dicatat sebagai isu PAST_RAIN_UNKNOWN dan lintasan masa lalu memakai skenario tanpa hujan secara eksplisit.
     * Interval dipotong pada pergantian tanggal lokal dan fase; F per interval berasal dari ET0 tanggal tsb.
     * rule_at(t) -> (nama_fase | None, PhaseRule | None); kc_param_at(t) -> Param | None (untuk status/domain).
     * Tidak ada angka dikarang: parameter PENDING/EXAMPLE, h usang, ET0 hari tak lengkap -> status & alasan khusus.
@@ -479,6 +509,24 @@ def recommend_timed(*, h_obs_cm: Optional[float], observed_at: Optional[datetime
         return fail("STALE_OBSERVATION", "STALE_OBSERVATION",
                     f"Pengamatan h terakhir berumur {age_h:.1f} jam (batas {max_h_age_hours:.0f} jam).",
                     age_h=age_h, limit_h=max_h_age_hours)
+
+    # 1b. Kejadian aktual sejak h dibaca (informasi yang tersedia pada waktu keputusan, bukan yang diketahui kemudian)
+    if since_obs:
+        n_irr = int(since_obs.get("irrigation_events") or 0) + int(since_obs.get("irrigation_decided") or 0)
+        rain_checked = "rain_mm" in since_obs                    # ruang demo: hujan = skenario eksplisit, tidak diperiksa
+        rain = since_obs.get("rain_mm")
+        if n_irr > 0:
+            return fail("STATE_NOT_RECONSTRUCTABLE", "IRRIGATION_SINCE_OBSERVATION",
+                        "Ada irigasi (keputusan/pelaksanaan) sejak h terakhir dibaca; keadaan petak tidak dapat direkonstruksi. "
+                        "Baca h baru.", n=n_irr)
+        if rain_checked and rain is not None and float(rain) > rain_block_mm:
+            return fail("STATE_NOT_RECONSTRUCTABLE", "RAIN_SINCE_OBSERVATION",
+                        f"Hujan terukur {float(rain):.1f} mm sejak h terakhir dibaca; dampaknya pada h tidak direkonstruksi. "
+                        "Baca h baru.", rain_mm=float(rain))
+        if rain_checked and rain is None:
+            out["issues"].append({"code": "PAST_RAIN_UNKNOWN"})
+            out["reasons"].append("Hujan sejak h dibaca tidak dapat dipastikan (cakupan rain gauge tidak lengkap); "
+                                  "bagian masa lalu dihitung dengan skenario tanpa hujan eksplisit.")
 
     # 2. Parameter wajib, aturan fase, domain
     ph_dec, rule_dec = rule_at(decision_at)

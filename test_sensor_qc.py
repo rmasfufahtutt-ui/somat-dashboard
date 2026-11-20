@@ -131,14 +131,18 @@ def _archive_frame(vals, status="OK"):
     return df
 
 
-def test_archive_rows_carry_qc_flag_codes_and_keep_raw_value(monkeypatch):
+def test_archive_rows_keep_raw_values_and_qc_goes_to_separate_plan(monkeypatch):
+    """H07: baris mentah hanya membawa status perangkat; hasil QC dipisah (observation_qc) lewat plan_qc_rows."""
     import repository as repo
     monkeypatch.setattr(repo, "J", lambda o: o)          # adaptor Json psycopg2 tidak ada di sandbox
-    rows = repo.build_sensor_archive_rows(_archive_frame([40.0, 41.0, 90.0, 41.0, 150.0, 40.0]))
+    df = _archive_frame([40.0, 41.0, 90.0, 41.0, 150.0, 40.0])
+    rows = repo.build_sensor_archive_rows(df)
     by_val = {r[3]: r for r in rows}
-    assert by_val[90.0][8] == "SUSPECT" and by_val[150.0][8] == "BAD" and by_val[40.0][8] == "OK"   # nilai mentah tersimpan
-    meta = by_val[150.0][10]
-    assert "OUT_OF_RANGE" in meta["qc_codes"].split(",") and meta["qc_action"] == "EXCLUDE_FROM_AUTOMATIC_USE"
+    assert by_val[90.0][8] == "OK" and by_val[150.0][8] == "OK" and by_val[40.0][8] == "OK"        # nilai mentah utuh
+    assert "qc_codes" not in by_val[150.0][10]
+    plan = repo.plan_qc_rows(df, {}, {r[9] for r in rows}, T0)
+    by_code = {p[3] for p in plan}
+    assert {"OUT_OF_RANGE", "SPIKE"} <= by_code and any(p[4] == "EXCLUDE_FROM_AUTOMATIC_USE" for p in plan)
 
 
 def test_archive_rows_keep_device_error_status_and_respect_since(monkeypatch):

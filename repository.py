@@ -15,6 +15,7 @@ import pandas as pd
 
 import db
 from db import db_query, transaction
+from physics_engine import decision_blockers
 
 try:
     from psycopg2.extras import Json
@@ -300,14 +301,15 @@ def last_sensor_times():
     return {r["sensor_id"]: r["last"] for r in rows}
 
 
+def sensor_ext_key(source_type, sensor_id, obs_utc) -> str:
+    return f"{source_type}:{sensor_id}:{obs_utc.isoformat()}"
+
+
 def build_sensor_archive_rows(df: pd.DataFrame, since: dict | None = None) -> list:
-    """Baris siap-simpan (tanpa DB). QC dijalankan pada SELURUH jendela yang diterima (agar tetangga tersedia), lalu hanya baris baru
-    yang dikirim. quality_flag = status perangkat bila bukan OK, selain itu flag QC; kode dan tindakan QC masuk meta. Nilai mentah
-    TIDAK diubah. Catatan: baris disimpan idempoten (ext_key), jadi titik paling akhir saat pertama masuk belum bisa dinilai spike."""
+    """Baris NILAI MENTAH siap-simpan (tanpa DB). quality_flag = status perangkat apa adanya (OK/ERROR/...); TIDAK ada hasil QC di
+    baris ini: QC disimpan terpisah, berversi, di observation_qc (H07). Nilai mentah tidak diubah."""
     if df is None or df.empty:
         return []
-    import sensor_qc
-    df = sensor_qc.assess(df)
     rows = []
     since = since or {}
     for r in df.itertuples(index=False):
@@ -316,24 +318,122 @@ def build_sensor_archive_rows(df: pd.DataFrame, since: dict | None = None) -> li
         if last is not None and obs_utc <= last:
             continue
         value = None if pd.isna(r.value) else float(r.value)
-        flag = sensor_qc.combine_flag(r.status, r.qc_flag)
+        flag = str(r.status or "OK").upper()
         rows.append((None, r.sensor_id, r.sensor_type, value, r.unit or "", obs_utc, "sensor-sheet",
-                     r.source_type, flag, f"{r.source_type}:{r.sensor_id}:{obs_utc.isoformat()}",
+                     r.source_type, flag, sensor_ext_key(r.source_type, r.sensor_id, obs_utc),
                      J({"location": r.location, "measurement_mode": r.measurement_mode,
-                        "device_id": r.device_id, "sequence": r.sequence,
-                        "qc_codes": r.qc_codes, "qc_action": r.qc_action})))
+                        "device_id": r.device_id, "sequence": r.sequence})))
     return rows
 
 
-def archive_sensor_rows(df: pd.DataFrame, since: dict | None = None) -> int:
-    """Simpan pembacaan sensor baru (idempoten via ext_key). `since` {sensor_id: waktu UTC terakhir terarsip}
-    membatasi baris yang dikirim. Mengembalikan jumlah baris yang dikirim ke DB."""
+def _qc_eval_rows(ext_key, qc_type, codes, rv, now, basis):
+    """Satu evaluasi -> baris per reason_code (atau satu baris 'NONE' bila lolos)."""
+    import sensor_qc
+    if not codes:
+        return [(ext_key, qc_type, "OK", "NONE", "USE", rv, now, now, basis)]
+    return [(ext_key, qc_type, sensor_qc.CODES[c][0], c, sensor_qc.CODES[c][1], rv, now, now, basis) for c in sorted(codes)]
+
+
+def plan_qc_rows(df: pd.DataFrame, stored: dict, new_keys: set, now: datetime, rules: dict | None = None) -> list:
+    """Rencana baris observation_qc (tanpa DB), idempoten terhadap evaluasi yang sudah tersimpan.
+      df     : seluruh jendela yang diterima (agar tetangga tersedia);  stored: {ext_key: frozenset(kode)} evaluasi TERAKHIR;
+      new_keys: ext_key baris yang baru masuk pada pengiriman ini;  now: waktu informasi ini tersedia (= evaluated_at = available_at).
+    Aturan: titik baru tanpa evaluasi -> ONLINE (informasi sampai titik itu). Titik tanpa evaluasi tersimpan yang bukan baru
+    (sebelum migrasi) -> RETROSPECTIVE. Sesudah itu, bila penilaian retrospektif (jendela penuh) berbeda dari evaluasi terakhir,
+    tambahkan evaluasi RETROSPECTIVE baru. Evaluasi lama tidak diubah. available_at = now: tidak pernah lebih awal dari saat
+    informasi itu benar-benar ada, sehingga keputusan historis tidak berubah."""
+    if df is None or df.empty:
+        return []
+    import sensor_qc
+    rv = sensor_qc.rule_version(rules)
+    retro = sensor_qc.assess(df, rules).reset_index(drop=True)
+    online = sensor_qc.assess_asof(df, rules).reset_index(drop=True)
+    out = []
+    for i, r in enumerate(retro.itertuples(index=False)):
+        key = sensor_ext_key(r.source_type, r.sensor_id, as_utc(r.timestamp))
+        a = frozenset(c for c in str(r.qc_codes or "").split(",") if c)
+        b = frozenset(c for c in str(online["qc_codes"].iloc[i] or "").split(",") if c)
+        last = stored.get(key)
+        if last is None:
+            if key in new_keys:
+                out += _qc_eval_rows(key, "ONLINE", b, rv, now, {"basis": "info up to this reading"})
+                last = b
+            else:
+                out += _qc_eval_rows(key, "RETROSPECTIVE", a, rv, now, {"basis": "baseline, no earlier QC stored"})
+                continue
+        if a != last:
+            out += _qc_eval_rows(key, "RETROSPECTIVE", a, rv, now, {"basis": "full window incl. later neighbours"})
+    return out
+
+
+_QC_INSERT = ("INSERT INTO observation_qc (obs_id, qc_type, qc_flag, reason_code, action, rule_version, evaluated_at, available_at, meta) "
+              "SELECT o.obs_id, v.qc_type, v.qc_flag, v.reason_code, v.action, v.rule_version, v.evaluated_at::timestamptz, "
+              "v.available_at::timestamptz, v.meta::jsonb FROM (VALUES %s) AS v(ext_key, qc_type, qc_flag, reason_code, action, "
+              "rule_version, evaluated_at, available_at, meta) JOIN observations o ON o.ext_key = v.ext_key "
+              "ON CONFLICT DO NOTHING")
+
+
+def latest_qc_codes(ext_keys: list) -> dict:
+    """{ext_key: frozenset(kode)} dari evaluasi TERAKHIR per pengamatan (retrospektif menang atas online bila waktu sama)."""
+    if not ext_keys:
+        return {}
+    rows = db_query(
+        "WITH latest AS (SELECT DISTINCT ON (q.obs_id) q.obs_id, q.available_at, q.qc_type FROM observation_qc q "
+        "JOIN observations o ON o.obs_id = q.obs_id WHERE o.ext_key = ANY(%s) "
+        "ORDER BY q.obs_id, q.available_at DESC, (q.qc_type = 'RETROSPECTIVE') DESC) "
+        "SELECT o.ext_key, q.reason_code FROM latest l JOIN observation_qc q ON q.obs_id = l.obs_id "
+        "AND q.available_at = l.available_at AND q.qc_type = l.qc_type JOIN observations o ON o.obs_id = l.obs_id",
+        (list(ext_keys),))
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["ext_key"], set())
+        if r["reason_code"] != "NONE":
+            out[r["ext_key"]].add(r["reason_code"])
+    return {k: frozenset(v) for k, v in out.items()}
+
+
+def archive_sensor_rows(df: pd.DataFrame, since: dict | None = None, now: datetime | None = None) -> int:
+    """Simpan pembacaan sensor baru (idempoten via ext_key) lalu hasil QC-nya di observation_qc. `since` {sensor_id: waktu UTC
+    terakhir terarsip} membatasi baris yang dikirim. Mengembalikan jumlah baris mentah yang dikirim ke DB."""
     rows = build_sensor_archive_rows(df, since)
     if not rows:
         return 0
-    return db.execute_values(
+    n = db.execute_values(
         "INSERT INTO observations (plot_id, sensor_id, variable, value, unit, observed_at, recorded_by, source_type, "
         "quality_flag, ext_key, meta) VALUES %s ON CONFLICT (ext_key) WHERE ext_key IS NOT NULL DO NOTHING", rows)
+    now = now or now_utc()
+    keys = [sensor_ext_key(r.source_type, r.sensor_id, as_utc(r.timestamp)) for r in df.itertuples(index=False)]
+    qc = plan_qc_rows(df, latest_qc_codes(keys), {r[9] for r in rows}, now)
+    if qc:
+        db.execute_values(_QC_INSERT, [q[:8] + (json.dumps(q[8]),) for q in qc])
+    return n
+
+
+def load_qc_asof(as_of: datetime, since: datetime | None = None, sensor_id: str | None = None) -> list:
+    """Penilaian QC yang TERSEDIA pada `as_of` (available_at <= as_of), satu dict per pengamatan: evaluasi dengan available_at
+    terbesar menang (retrospektif menang atas online bila sama). Penilaian yang baru tersedia sesudah as_of tidak ikut."""
+    rows = db_query(
+        "WITH ranked AS (SELECT q.*, dense_rank() OVER (PARTITION BY q.obs_id ORDER BY q.available_at DESC, "
+        "(q.qc_type = 'RETROSPECTIVE') DESC) AS rk FROM observation_qc q WHERE q.available_at <= %s) "
+        "SELECT r.obs_id, o.ext_key, o.sensor_id, o.observed_at, r.qc_type, r.qc_flag, r.reason_code, r.action, r.rule_version, "
+        "r.evaluated_at, r.available_at FROM ranked r JOIN observations o ON o.obs_id = r.obs_id WHERE r.rk = 1 "
+        "AND (%s::timestamptz IS NULL OR o.observed_at >= %s) AND (%s::text IS NULL OR o.sensor_id = %s) "
+        "ORDER BY o.observed_at, r.obs_id", (as_of, since, since, sensor_id, sensor_id))
+    order = {"USE": 0, "USE_WITH_WARNING": 1, "EXCLUDE_FROM_AUTOMATIC_USE": 2}
+    flags = {"OK": 0, "SUSPECT": 1, "BAD": 2}
+    by: dict = {}
+    for r in rows:
+        d = by.setdefault(r["obs_id"], {"obs_id": r["obs_id"], "ext_key": r["ext_key"], "sensor_id": r["sensor_id"],
+                                        "observed_at": r["observed_at"], "qc_type": r["qc_type"], "qc_flag": "OK",
+                                        "action": "USE", "reasons": [], "rule_version": r["rule_version"],
+                                        "evaluated_at": r["evaluated_at"], "available_at": r["available_at"]})
+        if r["reason_code"] != "NONE":
+            d["reasons"].append(r["reason_code"])
+        if flags[r["qc_flag"]] > flags[d["qc_flag"]]:
+            d["qc_flag"] = r["qc_flag"]
+        if order[r["action"]] > order[d["action"]]:
+            d["action"] = r["action"]
+    return list(by.values())
 
 
 def load_recent_sensor_frame(days=14) -> pd.DataFrame:
@@ -482,9 +582,16 @@ def record_decision(rec_id, user, decision, operator_mm, duration_h, note, idemp
         if run["expires_at"] <= cur.fetchone()["now"]:
             cur.execute("UPDATE recommendation_runs SET status='EXPIRED' WHERE rec_id=%s", (int(rec_id),))
             raise DecisionError("expired")
-        if run["run_mode"] not in ("BASELINE_PROVISIONAL", "BASELINE_VALIDATED", "ML_VALIDATED"):
-            raise DecisionError("not_operational", run_mode=run["run_mode"])
         snap = run["inputs_snapshot"] or {}
+        cur.execute("SELECT profile_id FROM plot_profile_versions WHERE plot_id=%s AND effective_to IS NULL "
+                    "ORDER BY version DESC LIMIT 1", (run["plot_id"],))
+        cur_prof = cur.fetchone()
+        profile_changed = bool(run.get("profile_id") is not None and cur_prof
+                               and int(cur_prof["profile_id"]) != int(run["profile_id"]))
+        blockers = decision_blockers(run_mode=run["run_mode"], status_code=run.get("status_code"),
+                                     profile_changed=profile_changed)
+        if blockers:
+            raise DecisionError(blockers[0], run_mode=run["run_mode"], status_code=run.get("status_code"))
         snap_obs = (snap.get("h_observation") or {}).get("obs_id")
         cur.execute("SELECT obs_id FROM observations WHERE variable='h_cm' AND plot_id=%s AND record_status='ACTIVE' "
                     "ORDER BY received_at DESC, obs_id DESC LIMIT 1", (run["plot_id"],))
@@ -611,3 +718,106 @@ def evaluation_rows(plot_id=None, limit=200):
                     ORDER BY ABS(EXTRACT(EPOCH FROM (o.observed_at - e.arrived_at))) LIMIT 1) AS observed_h_at_arrival
             FROM irrigation_events e LEFT JOIN recommendation_runs r ON r.rec_id = e.rec_id
             WHERE e.record_status='ACTIVE' {cond} ORDER BY e.arrived_at DESC NULLS LAST LIMIT %s""", (*params, int(limit)))
+
+
+# ====================================================================================================== H14: state bias adaptif
+class BiasConfigError(Exception):
+    """Konfigurasi bias tidak sah untuk jalur riset/operasional, atau berbeda dari yang sudah dibekukan untuk (petak, model)."""
+
+
+def _cfg_dict(cfg) -> dict:
+    return {"alpha": cfg.alpha, "lam": cfg.lam, "bmax": cfg.bmax, "max_age_days": cfg.max_age_days, "frozen_from": cfg.frozen_from}
+
+
+def _cfg_from(d: dict):
+    import bias_state
+    return bias_state.BiasConfig(alpha=float(d["alpha"]), lam=float(d["lam"]), bmax=float(d["bmax"]),
+                                 max_age_days=float(d["max_age_days"]), frozen_from=str(d.get("frozen_from") or ""))
+
+
+def _check_research_cfg(cfg) -> None:
+    ff = str(cfg.frozen_from or "").strip()
+    if not ff or ff.upper().startswith("ILUSTRASI"):
+        raise BiasConfigError("parameter bias untuk jalur riset/operasional harus dibekukan dari kalibrasi (frozen_from terisi, "
+                              "bukan ILUSTRASI DEMO)")
+
+
+def get_bias_state(plot_id: str, model: str):
+    """-> (BiasState, BiasConfig, version) dari DB, atau None bila belum ada. consumed = label yang sudah dipakai."""
+    import bias_state
+    rows = db_query("SELECT * FROM bias_state WHERE plot_id=%s AND model=%s", (plot_id, model.upper()))
+    if not rows:
+        return None
+    r = rows[0]
+    used = db_query("SELECT label_id FROM bias_update_log WHERE plot_id=%s AND model=%s AND applied",
+                    (plot_id, model.upper()))
+    st = bias_state.BiasState(plot_id, model, b=float(r["b"]), last_update_at=r["last_update_at"],
+                              last_window_end=r["last_window_end"], consumed={int(u["label_id"]) for u in used})
+    return st, _cfg_from(r["config"]), int(r["version"])
+
+
+def apply_bias_labels(plot_id: str, model: str, cfg, items: list, now: datetime | None = None) -> list:
+    """Terapkan label matang ke state bias (petak, model) secara ATOMIK dan tahan restart.
+    items: [{"label": {label_id, start, end, available_at, residual_mm_day, validity},
+             "prior": {issued_at, r_base_mm_day, prediction_id?, prior_ref?}}]  (waktu berzona).
+    State dikunci (SELECT ... FOR UPDATE), label yang sudah pernah dipakai dibaca dari bias_update_log (bukan dari memori),
+    sehingga restart/rerun tidak mereset bias dan tidak memakai label dua kali. Parameter bias dibekukan per (petak, model):
+    berbeda dari yang tersimpan -> BiasConfigError (perubahan = deviasi protokol, bukan tombol kalibrasi)."""
+    import bias_state
+    _check_research_cfg(cfg)
+    now = now or now_utc()
+    model = model.upper()
+    results = []
+    with transaction() as cur:
+        cur.execute("INSERT INTO bias_state (plot_id, model, config, updated_at) VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (plot_id, model) DO NOTHING", (plot_id, model, J(_cfg_dict(cfg)), now))
+        cur.execute("SELECT * FROM bias_state WHERE plot_id=%s AND model=%s FOR UPDATE", (plot_id, model))
+        row = cur.fetchone()
+        stored = row["config"]
+        if _cfg_dict(cfg) != {k: stored.get(k) for k in _cfg_dict(cfg)}:
+            if int(row["n_updates"]) == 0:                       # belum ada pembaruan: konfigurasi boleh ditetapkan ulang
+                cur.execute("UPDATE bias_state SET config=%s WHERE plot_id=%s AND model=%s",
+                            (J(_cfg_dict(cfg)), plot_id, model))
+            else:
+                raise BiasConfigError("parameter bias sudah dibekukan untuk petak/model ini dan berbeda dari yang diberikan")
+        cur.execute("SELECT label_id FROM bias_update_log WHERE plot_id=%s AND model=%s AND applied", (plot_id, model))
+        state = bias_state.BiasState(plot_id, model, b=float(row["b"]), last_update_at=row["last_update_at"],
+                                     last_window_end=row["last_window_end"],
+                                     consumed={int(u["label_id"]) for u in cur.fetchall()})
+        n_applied = 0
+        for it in sorted(items, key=lambda i: (i["label"]["end"], str(i["label"].get("label_id")))):
+            lab, prior = it["label"], it.get("prior")
+            rec = bias_state.apply_label(state, cfg, lab, prior, now)
+            results.append(rec)
+            lid = lab.get("label_id")
+            if lid is None or rec["reason"] == "ALREADY_USED":
+                continue                                          # tidak dicatat ulang (tak ada kunci / sudah tercatat)
+            pr = prior or {}
+            cur.execute(
+                "INSERT INTO bias_update_log (plot_id, model, label_id, applied, reason, prediction_id, prior_ref, prior_issued_at, "
+                "window_start, window_end, residual_mm_day, r_base_mm_day, e_base_mm_day, b_before, b_after, elapsed_days, "
+                "clipped, config, at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                (plot_id, model, int(lid), bool(rec["applied"]), rec["reason"], pr.get("prediction_id"),
+                 J(pr.get("prior_ref")) if pr.get("prior_ref") is not None else None, pr.get("issued_at"),
+                 lab.get("start"), lab.get("end"), lab.get("residual_mm_day"), pr.get("r_base_mm_day"),
+                 rec.get("e_base_mm_day"), rec.get("b_before"), rec.get("b_after"), rec.get("elapsed_days"),
+                 rec.get("clipped"), J(_cfg_dict(cfg)), now))
+            n_applied += 1 if rec["applied"] else 0
+        if n_applied:
+            cur.execute("UPDATE bias_state SET b=%s, last_update_at=%s, last_window_end=%s, n_updates=n_updates+%s, "
+                        "version=version+1, updated_at=%s WHERE plot_id=%s AND model=%s",
+                        (state.b, state.last_update_at, state.last_window_end, n_applied, now, plot_id, model))
+    return results
+
+
+def bias_for_issue_db(plot_id: str, model: str, issue_at: datetime) -> tuple:
+    """-> (bias yang dipakai, status, ringkasan audit). Tanpa state tersimpan: (0.0, "NO_BIAS_YET", None). Tidak memperbarui apa pun."""
+    import bias_state
+    got = get_bias_state(plot_id, model)
+    if got is None:
+        return 0.0, "NO_BIAS_YET", None
+    st, cfg, _ = got
+    b, status = bias_state.bias_for_issue(st, cfg, issue_at)
+    snap = bias_state.snapshot(st, cfg, issue_at)
+    snap["n_updates"] = len(st.consumed)          # riwayat memori kosong setelah restart; jumlah pembaruan = label terpakai di DB
+    return b, status, snap

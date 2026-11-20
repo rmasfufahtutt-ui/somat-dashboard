@@ -69,8 +69,10 @@ def test_demo_publish_rejects_operational_run_mode_and_unflagged_snapshot(demo):
 
 def test_ops_repository_still_rejects_demo_runs():
     """Jalur operasional tidak diubah: run DEMO tidak dapat diputuskan secara operasional (aturan di kode repository)."""
+    import physics_engine as pe
     src = open(os.path.join(os.path.dirname(__file__), "repository.py"), encoding="utf-8").read()
-    assert "not_operational" in src
+    assert "decision_blockers(" in src                                           # daftar izin tunggal dipakai repository
+    assert pe.decision_blockers(run_mode="DEMO", status_code="OK") == ["not_operational"]
 
 
 def test_demo_decisions_use_source_demo_never_operational(demo):

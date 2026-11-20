@@ -85,9 +85,12 @@ def render(ctx):
         plot(memo_fig("donut", (d.version, n_on, n_off), lambda: sensor_donut(n_on, n_off)), key="mon_donut")
     with c2:
         sm = d.sensor_df[d.sensor_df["sensor_type"] == "soil_moisture"]
-        plot(memo_fig("sm_trend", d.version, lambda: line_by_sensor(
-            sm, L("Soil Moisture Trend per Sensor (7 days)", "Tren Kelembapan per Sensor (7 hari)"),
-            L("Soil moisture (%)", "Kelembapan tanah (%)"))), key="mon_trend")
+        if sm.empty:
+            st.info(L("No soil moisture readings available.", "Belum ada pembacaan kelembapan tanah."))
+        else:
+            plot(memo_fig("sm_trend", d.version, lambda: line_by_sensor(
+                sm, L("Soil Moisture Trend per Sensor (7 days)", "Tren Kelembapan per Sensor (7 hari)"),
+                L("Soil moisture (%)", "Kelembapan tanah (%)"))), key="mon_trend")
     table(tbl, key="sensor_status")
     _qc_panel(d)
     st.divider()
@@ -105,8 +108,12 @@ def render(ctx):
     with col2:
         plot(memo_fig("l_rf", d.version, lambda: make_line_chart(sd, "rainfall", L("🌧️ Rainfall", "🌧️ Curah Hujan"),
                                                                  L("Rainfall (mm)", "Curah hujan (mm)"), bar=True)), key="mon_rf")
-        plot(memo_fig("l_cwr", d.version, lambda: make_line_chart(md, "crop_water_requirement", L("🌾 Crop Water Requirement (DEMO)", "🌾 Kebutuhan Air Tanaman (DEMO)"),
-                                                                  L("CWR (mm/day)", "KAT (mm/hari)"))), key="mon_cwr")
+        if d.legacy_available:
+            plot(memo_fig("l_cwr", d.version, lambda: make_line_chart(md, "crop_water_requirement", L("🌾 Crop Water Requirement (DEMO)", "🌾 Kebutuhan Air Tanaman (DEMO)"),
+                                                                      L("CWR (mm/day)", "KAT (mm/hari)"))), key="mon_cwr")
+        else:
+            st.caption(L("Crop water requirement is shown only in the plot recommendations in the operational workspace.",
+                         "Kebutuhan air tanaman hanya tampil pada rekomendasi petak di ruang operasional."))
 
     with st.expander(L("Stage A: sensor data", "Tahap A: data sensor")):
         table(pd.DataFrame(d.sensors), key="sensor_definition")

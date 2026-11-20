@@ -167,7 +167,7 @@ st.button("Toggle sidebar", key="sb_toggle", on_click=_toggle_sidebar,
 
 # ---------------- data: HANYA membaca snapshot ----------------
 SNAP = HUB.snapshot()
-D = derive.get(SNAP)
+D = derive.get(SNAP, allow_simulation=demo_mode.is_demo())   # ruang operasional: tanpa fallback simulasi (H06)
 CTX = SimpleNamespace(hub=HUB, settings=SETTINGS, snap=SNAP, d=D, user=user)
 
 

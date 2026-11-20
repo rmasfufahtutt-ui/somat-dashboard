@@ -10,6 +10,7 @@ import streamlit as st
 import auth
 import demo_mode
 import formstate as fs
+import physics_engine as pe
 import recommendation_service as rsvc
 import repo_router as repo
 import store
@@ -145,7 +146,7 @@ def _recommendation_block(ctx, pid, out, snapshot, profile, demo_res=None):
 
     u = auth.current_user()
     if auth.can_decide():
-        can_pub = out["run_mode"] in ("BASELINE_PROVISIONAL", "BASELINE_VALIDATED", "ML_VALIDATED")
+        can_pub = not pe.decision_blockers(run_mode=out["run_mode"], status_code=out["status"])
         if demo_res is not None:
             can_pub = out["status"] in ("OK", "TARGET_NOT_REACHABLE")
         if st.button(L("📨 Publish to Operator for decision", "📨 Terbitkan ke Operator untuk keputusan")
@@ -173,6 +174,10 @@ def _recommendation_block(ctx, pid, out, snapshot, profile, demo_res=None):
 
 
 def _legacy_block(d):
+    if not getattr(d, "legacy_available", True):
+        st.caption(L("The simulated prototype model is not available in the operational workspace.",
+                     "Model prototipe simulasi tidak tersedia di ruang operasional."))
+        return
     p, hyd, rec = d.prediction, d.hydraulic, d.recommendation
     st.caption(L("Rule-based prototype with assumed numbers. Kept for continuity; it never creates operational decisions.",
                  "Prototipe berbasis aturan dengan angka asumsi. Dipertahankan demi kesinambungan; tidak pernah membuat keputusan operasional."))

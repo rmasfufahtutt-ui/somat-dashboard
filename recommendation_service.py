@@ -9,6 +9,8 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
 import et0 as et0lib
 import physics_engine as pe
 
@@ -133,7 +135,7 @@ def compute(*, plot: dict, profile: Optional[dict], cycle: Optional[dict], h_obs
             points: list, decision_at: datetime, max_h_age_hours: float, inputs_dummy: bool = False,
             forecast_meta: Optional[dict] = None, pe_by_date: Optional[dict] = None, model: Optional[str] = None,
             ml_residual: Optional[float] = None, bias: float = 0.0, rain_label: Optional[str] = None,
-            bias_info: Optional[dict] = None) -> tuple:
+            bias_info: Optional[dict] = None, since_obs: Optional[dict] = None) -> tuple:
     """-> (output, snapshot). `output` hasil recommend_timed + penjelasan; `snapshot` seluruh input yang dipakai."""
     planting = cycle["planting_date"] if cycle else None
     snap = {
@@ -190,7 +192,9 @@ def compute(*, plot: dict, profile: Optional[dict], cycle: Optional[dict], h_obs
     out = pe.recommend_timed(
         h_obs_cm=h_obs["value"] if h_obs else None, observed_at=observed_at, decision_at=decision_at,
         drivers=drivers, profile=plot_profile, rule_at=rule_at, phase_breaks=breaks, kc_param_at=kc_param_at,
-        model=model, max_h_age_hours=max_h_age_hours, inputs_dummy=inputs_dummy, bias=bias)
+        model=model, max_h_age_hours=max_h_age_hours, inputs_dummy=inputs_dummy, bias=bias, since_obs=since_obs)
+    if since_obs is not None:
+        snap["since_obs"] = dict(since_obs)
     out["et0_by_date"] = {str(k): v for k, v in drivers.et0_by_date.items()}
     if rain_label and out.get("rain_scenario") == "NO_RAIN_SCENARIO" and pe_by_date:
         out["rain_scenario"], out["rain_note"] = rain_label, "Hujan efektif per tanggal dari skenario (bukan data BMKG)."
@@ -213,6 +217,72 @@ def _aware(t):
     return t if getattr(t, "tzinfo", None) else t.replace(tzinfo=timezone.utc)
 
 
+def _to_utc(x):
+    """Waktu apa pun (datetime/str/Timestamp; tanpa zona dianggap UTC) -> datetime berzona UTC; None bila tak terbaca."""
+    if x is None:
+        return None
+    try:
+        t = pd.Timestamp(x)
+    except Exception:
+        return None
+    if pd.isna(t):
+        return None
+    t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+    return t.to_pydatetime()
+
+
+def rain_since_observation(sensor_df, rain_sensor_id, observed_at: datetime, decision_at: datetime,
+                           max_gap_min: float = 180.0):
+    """Hujan terukur (mm) sejak h dibaca sampai waktu keputusan, atau None bila TIDAK dapat dipastikan.
+    Hujan tidak diketahui bukan nol: rain gauge harus ditetapkan untuk petak dan pembacaan OK-nya harus mencakup seluruh
+    [observed_at, decision_at] tanpa celah > max_gap_min [PILOT]. Pembacaan sensor bertimestamp WIB tanpa zona."""
+    if sensor_df is None or getattr(sensor_df, "empty", True) or not rain_sensor_id:
+        return None
+    import sensor_logic as sl
+    df = sensor_df
+    if not {"sensor_id", "sensor_type", "timestamp", "value", "status"} <= set(df.columns):
+        return None
+    rf = df[(df["sensor_id"] == rain_sensor_id) & (df["sensor_type"] == "rainfall")].copy()
+    rf["timestamp"] = pd.to_datetime(rf["timestamp"], errors="coerce")
+    rf["value"] = pd.to_numeric(rf["value"], errors="coerce")
+    rf = rf[(rf["status"].astype(str).str.upper() == "OK") & rf["timestamp"].notna() & rf["value"].notna()
+            & (rf["value"] >= 0)].sort_values("timestamp")
+    if rf.empty:
+        return None
+    t0 = pd.Timestamp(observed_at.astimezone(TZ).replace(tzinfo=None))
+    t1 = pd.Timestamp(decision_at.astimezone(TZ).replace(tzinfo=None))
+    gap = pd.Timedelta(minutes=max_gap_min)
+    ts = list(rf["timestamp"])
+    if ts[0] > t0 + gap or ts[-1] < t1 - gap:
+        return None
+    inside = [t for t in ts if t0 - gap <= t <= t1 + gap]
+    if any((b - a) > gap for a, b in zip(inside, inside[1:])):
+        return None
+    inc = sl._rainfall_increments(rf)
+    inc = inc[(inc["timestamp"] > t0) & (inc["timestamp"] <= t1)]
+    return float(inc["rain_increment"].sum()) if not inc.empty else 0.0
+
+
+def events_since_observation(repo, plot_id: str, observed_at: Optional[datetime], decision_at: datetime) -> dict:
+    """Irigasi yang tercatat/diputuskan sejak h dibaca (>= observed_at, <= decision_at). Hanya catatan ACTIVE."""
+    out = {"irrigation_events": 0, "irrigation_decided": 0}
+    if observed_at is None:
+        return out
+    t0, t1 = _to_utc(observed_at), _to_utc(decision_at)
+    for e in repo.list_irrigation_events(plot_id, 500) or []:
+        if str(e.get("record_status") or "ACTIVE") != "ACTIVE":
+            continue
+        t = _to_utc(e.get("arrived_at") or e.get("started_at") or e.get("ended_at") or e.get("recorded_at"))
+        if t is not None and t0 <= t <= t1:
+            out["irrigation_events"] += 1
+    for d in repo.list_decisions(500, plot_id, True) or []:
+        if d.get("decision") in ("APPROVE", "MODIFY") and (d.get("plot_id") in (None, plot_id)):
+            t = _to_utc(d.get("ts"))
+            if t is not None and t0 <= t <= t1:
+                out["irrigation_decided"] += 1
+    return out
+
+
 def gather_inputs(repo, plot_id: str, snapshot, decision_at: datetime) -> dict:
     plot = repo.get_plot(plot_id)
     profile = repo.get_active_profile(plot_id, decision_at)
@@ -230,8 +300,14 @@ def gather_inputs(repo, plot_id: str, snapshot, decision_at: datetime) -> dict:
             "issued_at": (fc or {}).get("issued_at"), "fetched_at": fetched,
             "n_points": len(points), "archived_slots": len(archived), "as_of": decision_at,
             "latest_excluded_not_yet_available": latest_excluded, "slot_runs": summarize_provenance(prov)}
+    since_obs = None
+    if h_obs is not None:
+        obs_at = _to_utc(h_obs["observed_at"])
+        since_obs = events_since_observation(repo, plot_id, obs_at, decision_at)
+        since_obs["rain_mm"] = rain_since_observation(getattr(snapshot, "sensor_df", None),
+                                                      (plot or {}).get("rain_source_id"), obs_at, _aware(decision_at))
     return {"plot": plot, "profile": profile, "cycle": cycle, "h_obs": h_obs, "points": points,
-            "forecast_meta": meta}
+            "forecast_meta": meta, "since_obs": since_obs}
 
 
 def run_and_publish(repo, plot_id: str, snapshot, actor: str, settings, decision_at: Optional[datetime] = None) -> dict:

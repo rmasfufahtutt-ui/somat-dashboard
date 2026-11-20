@@ -1,12 +1,13 @@
 """schema.py - migrasi Neon PostgreSQL SOMAT. Semua pernyataan idempoten (aman dijalankan ulang).
 
 v1 = skema prototipe yang sudah ada (users, decisions, audit_log, roles, sessions, pending_recommendations).
+v3 = QC sensor berversi terpisah dari nilai mentah (observation_qc) dan state bias adaptif per petak/model (bias_state, bias_update_log).
 v2 = Grand Framework v2 bagian 9: profil petak berversi, observations, arsip prakiraan, ET0 harian,
      pelaksanaan aktual, recommendation_runs yang tidak berubah, dan jejak audit yang diperluas.
 Data lama dipertahankan: akun, role, sesi, dan keputusan lama. Keputusan simulasi lama ditandai LEGACY_SIMULATION.
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 V1 = [
     """CREATE TABLE IF NOT EXISTS users (
@@ -328,4 +329,73 @@ V2 = [
     "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS new_value JSONB",
 ]
 
-ALL_STATEMENTS = V1 + V2
+V3 = [
+    # ---- H07: hasil QC sensor disimpan TERPISAH dari nilai mentah, berversi, dan append-only ----
+    # Satu evaluasi = himpunan baris dengan (obs_id, qc_type, evaluated_at, available_at) yang sama, satu baris per reason_code
+    # (reason_code 'NONE' = lolos). available_at = saat informasi yang dipakai evaluasi itu TERSEDIA di sistem; penilaian
+    # retrospektif ditambahkan sebagai evaluasi baru dan tidak mengubah apa yang tersedia pada keputusan historis.
+    """CREATE TABLE IF NOT EXISTS observation_qc (
+        qc_id BIGSERIAL PRIMARY KEY,
+        obs_id BIGINT NOT NULL REFERENCES observations(obs_id),
+        qc_type TEXT NOT NULL CHECK (qc_type IN ('ONLINE', 'RETROSPECTIVE')),
+        qc_flag TEXT NOT NULL CHECK (qc_flag IN ('OK', 'SUSPECT', 'BAD')),
+        reason_code TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('USE', 'USE_WITH_WARNING', 'EXCLUDE_FROM_AUTOMATIC_USE')),
+        rule_version TEXT NOT NULL,
+        evaluated_at TIMESTAMPTZ NOT NULL,
+        available_at TIMESTAMPTZ NOT NULL,
+        meta JSONB
+    )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_obsqc_eval ON observation_qc(obs_id, qc_type, rule_version, reason_code, available_at)",
+    "CREATE INDEX IF NOT EXISTS ix_obsqc_obs_avail ON observation_qc(obs_id, available_at DESC)",
+    # ---- H14: state bias adaptif per petak DAN model (M1B / M2), tahan restart, label dipakai paling banyak sekali ----
+    """CREATE TABLE IF NOT EXISTS bias_state (
+        plot_id TEXT NOT NULL,
+        model TEXT NOT NULL CHECK (model IN ('M1B', 'M2')),
+        b DOUBLE PRECISION NOT NULL DEFAULT 0,
+        last_update_at TIMESTAMPTZ,
+        last_window_end TIMESTAMPTZ,
+        n_updates INTEGER NOT NULL DEFAULT 0,
+        config JSONB NOT NULL,
+        version BIGINT NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (plot_id, model)
+    )""",
+    """CREATE TABLE IF NOT EXISTS bias_update_log (
+        event_id BIGSERIAL PRIMARY KEY,
+        plot_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        label_id BIGINT REFERENCES residual_labels(label_id),
+        applied BOOLEAN NOT NULL,
+        reason TEXT NOT NULL,
+        prediction_id BIGINT REFERENCES prediction_log(prediction_id),
+        prior_ref JSONB,
+        prior_issued_at TIMESTAMPTZ,
+        window_start TIMESTAMPTZ,
+        window_end TIMESTAMPTZ,
+        residual_mm_day DOUBLE PRECISION,
+        r_base_mm_day DOUBLE PRECISION,
+        e_base_mm_day DOUBLE PRECISION,
+        b_before DOUBLE PRECISION,
+        b_after DOUBLE PRECISION,
+        elapsed_days DOUBLE PRECISION,
+        clipped BOOLEAN,
+        config JSONB,
+        at TIMESTAMPTZ NOT NULL
+    )""",
+    # satu label memperbarui state paling banyak sekali per (petak, model)
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_biaslog_applied ON bias_update_log(plot_id, model, label_id) WHERE applied",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_biaslog_skip ON bias_update_log(plot_id, model, label_id, reason) WHERE NOT applied",
+    # ---- append-only: tabel jejak tidak boleh diubah atau dihapus ----
+    """CREATE OR REPLACE FUNCTION somat_forbid_mutation() RETURNS trigger AS $$
+    BEGIN
+        RAISE EXCEPTION 'tabel jejak bersifat append-only';
+    END;
+    $$ LANGUAGE plpgsql""",
+    "DROP TRIGGER IF EXISTS trg_obsqc_append_only ON observation_qc",
+    "CREATE TRIGGER trg_obsqc_append_only BEFORE UPDATE OR DELETE ON observation_qc FOR EACH ROW EXECUTE FUNCTION somat_forbid_mutation()",
+    "DROP TRIGGER IF EXISTS trg_biaslog_append_only ON bias_update_log",
+    "CREATE TRIGGER trg_biaslog_append_only BEFORE UPDATE OR DELETE ON bias_update_log FOR EACH ROW EXECUTE FUNCTION somat_forbid_mutation()",
+]
+
+ALL_STATEMENTS = V1 + V2 + V3

@@ -18,6 +18,10 @@ MODE_TEXT = {
                          "Google Sheets terhubung tetapi belum ada pembacaan — nilai DEMO ditampilkan."),
     "SIMULATION_FALLBACK": ("bad", "Google Sheets unavailable — DEMO (simulated) values are shown. Not field measurements.",
                             "Google Sheets tidak terjangkau — nilai DEMO (simulasi) ditampilkan. Bukan hasil pengukuran."),
+    "UNAVAILABLE": ("bad", "No usable sensor data right now (source unavailable, empty, or all readings excluded by QC). "
+                    "Values are shown as unavailable; no simulated values are used in the operational workspace.",
+                    "Belum ada data sensor yang dapat dipakai (sumber tak tersedia, kosong, atau semua pembacaan dikeluarkan QC). "
+                    "Nilai ditampilkan tidak tersedia; nilai simulasi tidak dipakai di ruang operasional."),
     "SIMULATION": ("warn", "No sensor source configured — DEMO (simulated) values are shown. Not field measurements.",
                    "Sumber sensor belum dikonfigurasi — nilai DEMO (simulasi) ditampilkan. Bukan hasil pengukuran."),
 }
@@ -38,6 +42,44 @@ def render(ctx):
     st.header(L("Conditions Overview", "Ringkasan Kondisi (Overview)"))
     mode_banner(d)
     lt = d.latest
+    if not d.legacy_available:
+        _operational_cards(d)
+    else:
+        _legacy_cards(d, lt)
+    _tail(d, ctx)
+
+
+def _fin(x) -> bool:
+    try:
+        return x is not None and x == x and abs(float(x)) != float("inf")
+    except Exception:
+        return False
+
+
+def _val(x, **kw):
+    """Kartu bernilai bila angka ada; bila tidak, tampil '—' (tidak tersedia), bukan 0 atau simulasi."""
+    return dict(kw, target=x) if _fin(x) else dict(kw, value_text="—", badge_text=L("Unavailable", "Tidak tersedia"),
+                                                    badge_kind="warn", color="orange")
+
+
+def _operational_cards(d):
+    """Ruang operasional: hanya nilai sensor nyata. Model prototipe simulasi tidak dipakai."""
+    s = d.sensor_summary
+    cards([
+        _val(s.get("soil_moisture"), icon="🌱", title=L("Soil Moisture", "Kelembapan Tanah"), decimals=1, suffix=" %",
+             note=L("Fresh valid readings only (≤ 3 h)", "Hanya pembacaan valid segar (≤ 3 jam)")),
+        _val(s.get("water_level"), icon="🌊", title=L("Canal Water Level", "Tinggi Muka Air"), decimals=2, suffix=" m",
+             note=L("Fresh valid readings only (≤ 3 h)", "Hanya pembacaan valid segar (≤ 3 jam)")),
+        _val(s.get("rainfall"), icon="🌧️", title=L("Rainfall", "Curah Hujan"), decimals=1, suffix=" mm",
+             note=L("Rain gauge, last 24 h", "Rain gauge, 24 jam terakhir")),
+        dict(icon="🛡️", title=L("System Status", "Status Sistem"), value_text=L("UNKNOWN", "TIDAK DIKETAHUI"),
+             note=L("Crop water requirement and irrigation decisions come from the plot recommendations, not from this overview.",
+                    "Kebutuhan air dan keputusan irigasi berasal dari rekomendasi petak, bukan dari ringkasan ini."),
+             badge_text=L("See Recommendations", "Lihat Rekomendasi"), badge_kind="info", color="blue"),
+    ], columns=4)
+
+
+def _legacy_cards(d, lt):
     low_m, heavy_r = 20, 20
     sm_ok = lt["soil_moisture"] >= low_m
     wl_ok = lt["water_level"] >= ASSUMPTIONS["min_water_level"]
@@ -71,6 +113,13 @@ def render(ctx):
              color=ok(normal, "green", "red")),
     ], columns=3)
 
+
+def _tail(d, ctx):
+    lt = d.latest
+    low_m, heavy_r = 20, 20
+    sm_ok = _fin(lt['soil_moisture']) and lt['soil_moisture'] >= low_m
+    wl_ok = _fin(lt['water_level']) and lt['water_level'] >= ASSUMPTIONS['min_water_level']
+    rain_ok = _fin(lt['rainfall']) and lt['rainfall'] < heavy_r
     if demo_mode.is_demo():
         from views import demo_panels
         demo_panels.plots_overview(ctx)
@@ -98,8 +147,9 @@ def render(ctx):
                 + " · ".join([("✔" if sm_ok else "⚠") + " " + L("soil moisture", "kelembapan tanah"),
                               ("✔" if wl_ok else "⚠") + " " + L("water level", "muka air"),
                               ("✔" if rain_ok else "⚠") + " " + L("rainfall", "hujan"),
-                              ("✔" if d.hydraulic["feasible"] else "⚠") + " " + L("hydraulics (DEMO)", "hidraulik (DEMO)"),
-                              ("✔" if not d.alerts else "⚠") + " " + L(f"{len(d.alerts)} alert(s)", f"{len(d.alerts)} peringatan")])
+                              *([("✔" if d.hydraulic["feasible"] else "⚠") + " " + L("hydraulics (DEMO)", "hidraulik (DEMO)"),
+                                 ("✔" if not d.alerts else "⚠") + " " + L(f"{len(d.alerts)} alert(s)", f"{len(d.alerts)} peringatan")]
+                                if d.legacy_available else [])])
                 + "</div>", unsafe_allow_html=True)
 
     st.header(L("Latest Conditions Chart (Last 14 Days)", "Grafik Kondisi Terbaru (14 Hari Terakhir)"))

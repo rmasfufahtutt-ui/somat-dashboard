@@ -256,6 +256,8 @@ def build_sensor_daily_history(sensor_df, fallback_sensor_df=None, days=14):
 
     def _series(frame, sensor_type):
         data = _valid_frame(frame)
+        if data.empty or "sensor_type" not in data.columns:
+            return pd.Series(dtype=float)
         data = data[data["sensor_type"] == sensor_type].copy()
         if data.empty:
             return pd.Series(dtype=float)

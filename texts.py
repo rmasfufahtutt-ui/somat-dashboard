@@ -7,6 +7,7 @@ STATUS = {
     "OK": ("OK", "OK"),
     "NEEDS_FIELD_OBSERVATION": ("Field observation needed", "Perlu pengamatan lapangan"),
     "STALE_OBSERVATION": ("Observation too old", "Pengamatan terlalu lama"),
+    "STATE_NOT_RECONSTRUCTABLE": ("Plot state cannot be reconstructed — new h needed", "Keadaan petak tidak dapat direkonstruksi — perlu h baru"),
     "INVALID_OBSERVATION": ("Invalid observation", "Pengamatan tidak valid"),
     "MISSING_PARAMETER": ("Parameters pending", "Parameter belum ditetapkan"),
     "INVALID_PARAMETER": ("Parameter out of domain", "Parameter di luar domain"),
@@ -30,6 +31,10 @@ PARAM_STATUS = {"CALIBRATED": ("Calibrated", "Terkalibrasi"), "LITERATURE": ("Li
 PARAM_KIND = {"CALIBRATED": "ok", "LITERATURE": "info", "EXAMPLE": "warn", "PENDING": "bad"}
 ISSUE = {
     "NO_H_OBSERVATION": ("No valid field h observation.", "Belum ada pengamatan h lapangan yang sah."),
+    "IRRIGATION_SINCE_OBSERVATION": ("Irrigation was decided or executed since the last h reading.", "Ada irigasi (diputuskan/dilaksanakan) sejak pembacaan h terakhir."),
+    "RAIN_SINCE_OBSERVATION": ("Measured rain since the last h reading.", "Ada hujan terukur sejak pembacaan h terakhir."),
+    "PAST_RAIN_UNKNOWN": ("Rain since the last h reading could not be confirmed (gauge coverage incomplete); the past part assumes no rain.",
+                          "Hujan sejak pembacaan h terakhir tidak dapat dipastikan (cakupan rain gauge tidak lengkap); bagian lalu diasumsikan tanpa hujan."),
     "OBSERVATION_IN_FUTURE": ("Observation time is in the future.", "Waktu pengamatan di masa depan."),
     "DURATION_NEEDS_PLOT_DISCHARGE": ("Duration needs the discharge into this plot (not canal discharge).",
                                       "Durasi memerlukan debit ke petak ini (bukan debit saluran)."),
@@ -45,6 +50,8 @@ DECISION_ERR = {
     "already_handled": ("Already decided, replaced or expired — nothing was recorded.", "Sudah diputuskan, diganti, atau kedaluwarsa — tidak ada yang dicatat."),
     "expired": ("This recommendation has expired — nothing was recorded.", "Rekomendasi kedaluwarsa — tidak ada yang dicatat."),
     "not_operational": ("DEMO / manual-required runs cannot be decided operationally.", "Run DEMO / perlu-manual tidak dapat diputuskan operasional."),
+    "not_decidable_status": ("This run's result status does not allow a decision (e.g. missing data).", "Status hasil run ini tidak memungkinkan keputusan (mis. data kurang)."),
+    "profile_changed": ("The plot's parameter profile changed since this recommendation. Recalculate first.", "Profil parameter petak berubah sejak rekomendasi ini. Hitung ulang dulu."),
     "inputs_changed": ("A newer h observation exists since this recommendation. Recalculate first.", "Ada pengamatan h yang lebih baru sejak rekomendasi ini. Hitung ulang dulu."),
     "not_demo": ("This run is not a DEMO run; it cannot be decided in the demo space.", "Run ini bukan run DEMO; tidak dapat diputuskan di ruang demo."),
     "approve_invalid": ("APPROVE/MODIFY need a computed irrigation amount; this run has none.", "APPROVE/MODIFY butuh jumlah irigasi terhitung; run ini tidak punya."),

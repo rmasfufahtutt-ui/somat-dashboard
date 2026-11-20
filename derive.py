@@ -1,7 +1,9 @@
 """derive.py - turunan tampilan dari snapshot hub, dihitung SEKALI per versi snapshot (memo di memori).
 
 Pindah tab / rerun tidak menghitung ulang pandas apa pun; hanya saat hub menerbitkan snapshot baru.
-Data simulasi (legacy_prototype) dipakai HANYA sebagai DEMO bila sensor nyata tidak tersedia, dan selalu berlabel.
+Data simulasi (legacy_prototype) hanya boleh muncul di ruang DEMO (allow_simulation=True). Di ruang operasional
+(allow_simulation=False) data yang tidak tersedia/tersaring QC menjadi "tidak tersedia" (NaN) atau data nyata terakhir
+berumur jelas; nilai simulasi tidak pernah masuk ringkasan, tren, status petak, atau perhitungan operasional.
 """
 from __future__ import annotations
 
@@ -30,7 +32,7 @@ def _sim():
 @dataclass
 class Derived:
     version: int
-    mode: str                       # LIVE | CACHED_DB | WAITING_FOR_DATA | SIMULATION_FALLBACK | SIMULATION
+    mode: str                       # LIVE | CACHED_DB | WAITING_FOR_DATA | SIMULATION_FALLBACK | SIMULATION | UNAVAILABLE
     sensor_df: pd.DataFrame
     sensors: list
     sensor_summary: dict
@@ -47,6 +49,8 @@ class Derived:
     n_total: int = 0
     source_types: list = field(default_factory=list)
     n_qc_excluded: int = 0          # pembacaan OK yang dikeluarkan dari perhitungan otomatis oleh QC (nilai mentah tetap ada)
+    legacy_available: bool = True   # model prototipe (legacy_prototype, simulasi) tersedia hanya di ruang DEMO
+    allow_simulation: bool = True
 
     @property
     def is_real(self) -> bool:
@@ -76,7 +80,10 @@ def _sensors_from_df(df):
     return rows
 
 
-def compute(snap) -> Derived:
+_NAN_LATEST_KEYS = ("soil_moisture", "water_level", "rainfall", "et0", "available_discharge", "crop_water_requirement")
+
+
+def compute(snap, allow_simulation: bool = True) -> Derived:
     sim = _sim()
     src = snap.source("sensor")
     live = snap.sensor_df is not None and not snap.sensor_df.empty
@@ -86,9 +93,17 @@ def compute(snap) -> Derived:
         cfg = _sensors_from_config((snap.sensor_meta or {}).get("sensors"))
         sensors = cfg or _sensors_from_df(sensor_df)
         summary = sl.summarize_sensors(gated, sensor_config=(snap.sensor_meta or {}).get("sensors"),
-                                       fallback_summary=sim["summary"])
-        daily = sl.build_sensor_daily_history(gated, fallback_sensor_df=sim["sensor_df"], days=14)
+                                       fallback_summary=sim["summary"] if allow_simulation else None)
+        daily = sl.build_sensor_daily_history(gated, fallback_sensor_df=sim["sensor_df"] if allow_simulation else None,
+                                              days=14)
         mode = "CACHED_DB" if src.origin == "db_cache" else "LIVE"
+    elif not allow_simulation:
+        n_qc_excluded = 0
+        sensor_df = gated = sim["sensor_df"].iloc[0:0].copy()          # kosong, kolom tetap
+        sensors = _sensors_from_config((snap.sensor_meta or {}).get("sensors"))
+        summary = sl.summarize_sensors(gated, sensor_config=(snap.sensor_meta or {}).get("sensors"), fallback_summary=None)
+        daily = sl.build_sensor_daily_history(gated, days=14)
+        mode = "UNAVAILABLE"
     else:
         n_qc_excluded = 0
         gated = sensor_df = sim["sensor_df"]
@@ -103,6 +118,8 @@ def compute(snap) -> Derived:
         else:
             mode = "SIMULATION"
     table = sl.sensor_status_table(gated, sensors)
+    if not allow_simulation:
+        return _operational_derived(snap, mode, sensor_df, sensors, summary, daily, table, n_qc_excluded)
     model_df = sim["df"]
     latest = model_df.iloc[-1].copy()
     for k in ("soil_moisture", "water_level", "rainfall"):
@@ -127,15 +144,30 @@ def compute(snap) -> Derived:
                    n_online=n_on, n_total=len(table), source_types=types, n_qc_excluded=n_qc_excluded)
 
 
-def get(snap) -> Derived:
+def _operational_derived(snap, mode, sensor_df, sensors, summary, daily, table, n_qc_excluded) -> Derived:
+    """Ruang operasional: tidak ada model prototipe simulasi; nilai tak tersedia tetap NaN."""
+    latest = {k: float("nan") for k in _NAN_LATEST_KEYS}
+    for k in ("soil_moisture", "water_level", "rainfall"):
+        latest[k] = summary.get(k, float("nan"))
+    n_on = int((table["Status"] == "Online").sum()) if len(table) else 0
+    types = sorted(set(sensor_df["source_type"].dropna().astype(str))) if "source_type" in sensor_df.columns else []
+    return Derived(version=snap.version, mode=mode, sensor_df=sensor_df, sensors=sensors, sensor_summary=summary,
+                   sensor_daily=daily, sensor_table=table, model_df=_sim()["df"].iloc[0:0].copy(), latest=latest,
+                   prediction={}, hydraulic={}, recommendation={}, alerts=[], system_status="UNKNOWN",
+                   n_online=n_on, n_total=len(table), source_types=types, n_qc_excluded=n_qc_excluded,
+                   legacy_available=False, allow_simulation=False)
+
+
+def get(snap, allow_simulation: bool = True) -> Derived:
     """Turunan untuk snapshot ini (memo per versi; hanya 2 versi terakhir disimpan)."""
-    d = _MEMO.get(snap.version)
+    key = (snap.version, bool(allow_simulation))
+    d = _MEMO.get(key)
     if d is None:
         with _LOCK:
-            d = _MEMO.get(snap.version)
+            d = _MEMO.get(key)
             if d is None:
-                d = compute(snap)
-                for old in sorted(_MEMO)[:-1]:
+                d = compute(snap, allow_simulation=allow_simulation)
+                for old in sorted(_MEMO, key=lambda k: k[0])[:-2]:
                     _MEMO.pop(old, None)
-                _MEMO[snap.version] = d
+                _MEMO[key] = d
     return d

@@ -108,7 +108,7 @@ def _run_card(ctx, run):
                 unsafe_allow_html=True)
     modifying = st.session_state.get("op_modify") == rid
     can_apply = bool(out.get("irrigate")) and out.get("total_mm") is not None
-    operational = mode in ("BASELINE_PROVISIONAL", "BASELINE_VALIDATED", "ML_VALIDATED")
+    operational = not pe.decision_blockers(run_mode=mode, status_code=run.get("status_code"))
     if demo_mode.is_demo():
         # Ruang DEMO: run 'DEMO' dapat diputuskan (SIMULASI) bila mesin menghasilkan angka (OK / TARGET_NOT_REACHABLE);
         # run MANUAL_REQUIRED (pengamatan usang, parameter kurang, dst.) tetap tidak dapat disetujui.
