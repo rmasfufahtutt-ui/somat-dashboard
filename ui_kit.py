@@ -45,14 +45,18 @@ _BADGE = {"ok": "#16884A", "warn": "#D85A10", "info": "#256FD1", "bad": "#C03A40
 
 
 def card_html(icon, title, note="", badge_text="", badge_kind="info", color="blue", target=None, decimals=0,
-              prefix="", suffix="", value_text=None):
+              prefix="", suffix="", value_text=None, cls="", bars=None):
     value = (f"{html.escape(str(prefix))}{float(target):.{int(decimals)}f}{html.escape(str(suffix))}"
              if target is not None else html.escape(str(value_text if value_text is not None else "—")))
     badge = (f'<span class="k-badge" style="background:{_BADGE.get(badge_kind, _BADGE["info"])}">'
              f'{html.escape(str(badge_text))}</span>' if badge_text else "")
-    return (f'<div class="k-card" style="border-top-color:{_PALETTE.get(color, _PALETTE["blue"])}">'
+    # bars: [(persen 0-100, warna)] -> bar tipis di bawah angka (mis. debit tersedia vs dibutuhkan)
+    bar_html = "".join(f'<div class="k-bar"><i style="width:{max(0.0, min(100.0, float(p))):.0f}%;background:{html.escape(str(c), quote=True)}"></i></div>'
+                       for p, c in (bars or []))
+    klass = ("k-card " + html.escape(cls, quote=True)).strip()
+    return (f'<div class="{klass}" style="border-top-color:{_PALETTE.get(color, _PALETTE["blue"])}">'
             f'<div class="k-title"><span>{html.escape(str(icon))}</span>{html.escape(str(title))}</div>'
-            f'<div class="k-value">{value}</div>'
+            f'<div class="k-value">{value}</div>{bar_html}'
             f'<div class="k-foot">{badge}<span class="k-note">{html.escape(str(note))}</span></div></div>')
 
 

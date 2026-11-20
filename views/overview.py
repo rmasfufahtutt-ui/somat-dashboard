@@ -1,9 +1,12 @@
 """views/overview.py - ringkasan kondisi. Hanya membaca snapshot + turunan yang sudah di-memo."""
 from __future__ import annotations
 
+from functools import lru_cache
+
 import streamlit as st
 
 import demo_mode
+import ocean_theme
 import store
 from i18n import L
 from legacy_prototype import ASSUMPTIONS
@@ -40,6 +43,7 @@ def mode_banner(d):
 def render(ctx):
     d = ctx.d
     st.header(L("Conditions Overview", "Ringkasan Kondisi (Overview)"))
+    ocean_theme.render_steps(L, getattr(ctx, "nav_allowed", None))
     mode_banner(d)
     lt = d.latest
     if not d.legacy_available:
@@ -62,44 +66,84 @@ def _val(x, **kw):
                                                     badge_kind="warn", color="orange")
 
 
+@lru_cache(maxsize=48)
+def _svg_soil(v, low, lm, ll, ln):
+    return ocean_theme.soil_svg(v, low, lm, ll, ln)
+
+
+@lru_cache(maxsize=48)
+def _svg_canal(v, mn, lm, lb, ln):
+    return ocean_theme.canal_svg(v, mn, 2.0, lm, lb, ln)
+
+
+@lru_cache(maxsize=48)
+def _svg_rain(v, lim, ll, ln):
+    return ocean_theme.rain_svg(v, lim, ll, ln)
+
+
+def _num_or_none(x):
+    return float(x) if _fin(x) else None
+
+
+def _trio(sm, wl, rn, low_m=20, min_wl=None, heavy_r=20):
+    """Tiga kartu bergambar (tanah, saluran, hujan). Ilustrasi mengikuti nilai ukur; nilai tak tersedia -> tanpa air/zona lembap."""
+    min_wl = ASSUMPTIONS["min_water_level"] if min_wl is None else min_wl
+    sm, wl, rn = _num_or_none(sm), _num_or_none(wl), _num_or_none(rn)
+    na_txt = L("Fresh valid readings only (≤ 3 h)", "Hanya pembacaan valid segar (≤ 3 jam)")
+    unavail = (L("Unavailable", "Tidak tersedia"), "warn")
+
+    def badge(v, ok, low_text):
+        return unavail if v is None else ((L("Normal", "Normal"), "ok") if ok else (low_text, "warn"))
+
+    sm_b = badge(sm, sm is not None and sm >= low_m, L("Low", "Rendah"))
+    wl_b = badge(wl, wl is not None and wl >= min_wl, L("Low", "Rendah"))
+    rn_b = badge(rn, rn is not None and rn < heavy_r, L("High", "Tinggi"))
+    no_data = L("No data", "Tidak ada data")
+    soil = dict(svg=_svg_soil(sm, float(low_m), L("moisture", "lembap"), L("LOW LIMIT", "BATAS RENDAH"), no_data),
+                alt=L(f"Soil profile with a plant: moisture {sm:.1f}%, low limit {low_m}%", f"Profil tanah dengan tanaman: kelembapan {sm:.1f}%, batas rendah {low_m}%")
+                if sm is not None else L("Soil profile: no moisture reading", "Profil tanah: belum ada pembacaan kelembapan"),
+                title=L("Soil moisture", "Kelembapan tanah"), value=sm, decimals=1, unit="%",
+                sub=na_txt if sm is None else (L(f"Above the low limit of {low_m}%", f"Di atas batas rendah {low_m}%") if sm >= low_m
+                                               else L(f"Below the low limit of {low_m}%", f"Di bawah batas rendah {low_m}%")),
+                badge_text=sm_b[0], badge_kind=sm_b[1])
+    canal = dict(svg=_svg_canal(wl, float(min_wl), L("MIN", "MIN"), L("bed", "dasar"), no_data),
+                 alt=L(f"Canal cross-section: water level {wl:.2f} m, minimum {min_wl} m", f"Penampang saluran: muka air {wl:.2f} m, minimum {min_wl} m")
+                 if wl is not None else L("Canal cross-section: no water level reading", "Penampang saluran: belum ada pembacaan muka air"),
+                 title=L("Canal water level", "Tinggi muka air"), value=wl, decimals=2, unit="m",
+                 sub=na_txt if wl is None else f"Minimum {min_wl} m", badge_text=wl_b[0], badge_kind=wl_b[1])
+    rain = dict(svg=_svg_rain(rn, float(heavy_r), L("High limit", "Batas tinggi"), no_data),
+                alt=L(f"Cloud: rainfall {rn:.1f} mm, high limit {heavy_r} mm", f"Awan: curah hujan {rn:.1f} mm, batas tinggi {heavy_r} mm")
+                if rn is not None else L("Cloud: no rainfall reading", "Awan: belum ada pembacaan curah hujan"),
+                title=L("Rainfall", "Curah hujan"), value=rn, decimals=1, unit="mm",
+                sub=L("Rain gauge, last 24 h", "Rain gauge, 24 jam terakhir") if rn is None else L(f"High limit {heavy_r} mm", f"Batas tinggi {heavy_r} mm"),
+                badge_text=rn_b[0], badge_kind=rn_b[1])
+    st.markdown(ocean_theme.sensor_trio(soil, canal, rain), unsafe_allow_html=True)
+
+
 def _operational_cards(d):
     """Ruang operasional: hanya nilai sensor nyata. Model prototipe simulasi tidak dipakai."""
     s = d.sensor_summary
+    _trio(s.get("soil_moisture"), s.get("water_level"), s.get("rainfall"))
     cards([
-        _val(s.get("soil_moisture"), icon="🌱", title=L("Soil Moisture", "Kelembapan Tanah"), decimals=1, suffix=" %",
-             note=L("Fresh valid readings only (≤ 3 h)", "Hanya pembacaan valid segar (≤ 3 jam)")),
-        _val(s.get("water_level"), icon="🌊", title=L("Canal Water Level", "Tinggi Muka Air"), decimals=2, suffix=" m",
-             note=L("Fresh valid readings only (≤ 3 h)", "Hanya pembacaan valid segar (≤ 3 jam)")),
-        _val(s.get("rainfall"), icon="🌧️", title=L("Rainfall", "Curah Hujan"), decimals=1, suffix=" mm",
-             note=L("Rain gauge, last 24 h", "Rain gauge, 24 jam terakhir")),
         dict(icon="🛡️", title=L("System Status", "Status Sistem"), value_text=L("UNKNOWN", "TIDAK DIKETAHUI"),
              note=L("Crop water requirement and irrigation decisions come from the plot recommendations, not from this overview.",
                     "Kebutuhan air dan keputusan irigasi berasal dari rekomendasi petak, bukan dari ringkasan ini."),
              badge_text=L("See Recommendations", "Lihat Rekomendasi"), badge_kind="info", color="blue"),
-    ], columns=4)
+    ], columns=1)
 
 
 def _legacy_cards(d, lt):
+    """Ruang DEMO / prototipe: tiga kartu bergambar + debit, kebutuhan air tanaman, status sistem."""
     low_m, heavy_r = 20, 20
-    sm_ok = lt["soil_moisture"] >= low_m
-    wl_ok = lt["water_level"] >= ASSUMPTIONS["min_water_level"]
-    rain_ok = lt["rainfall"] < heavy_r
     q_ok = lt["available_discharge"] >= d.hydraulic["required_discharge"]
     normal = d.system_status == "NORMAL"
     ok = lambda b, a, c: (a if b else c)
+    _trio(lt["soil_moisture"], lt["water_level"], lt["rainfall"], low_m=low_m, heavy_r=heavy_r)
+    req, avail = float(d.hydraulic["required_discharge"]), float(lt["available_discharge"])
     cards([
-        dict(icon="🌱", title=L("Soil Moisture", "Kelembapan Tanah"), target=lt["soil_moisture"], decimals=1, suffix=" %",
-             note=L(f"Low limit {low_m}%", f"Batas rendah {low_m}%"), badge_text=ok(sm_ok, "Normal", L("Low", "Rendah")),
-             badge_kind=ok(sm_ok, "ok", "warn"), color=ok(sm_ok, "green", "orange")),
-        dict(icon="🌊", title=L("Canal Water Level", "Tinggi Muka Air"), target=lt["water_level"], decimals=2, suffix=" m",
-             note=f"Minimum {ASSUMPTIONS['min_water_level']} m", badge_text=ok(wl_ok, "Normal", L("Low", "Rendah")),
-             badge_kind=ok(wl_ok, "ok", "warn"), color=ok(wl_ok, "blue", "orange")),
-        dict(icon="🌧️", title=L("Rainfall", "Curah Hujan"), target=lt["rainfall"], decimals=1, suffix=" mm",
-             note=L(f"High limit {heavy_r} mm", f"Batas tinggi {heavy_r} mm"), badge_text=ok(rain_ok, "Normal", L("High", "Tinggi")),
-             badge_kind=ok(rain_ok, "ok", "warn"), color=ok(rain_ok, "blue", "orange")),
         dict(icon="💧", title=L("Available Discharge", "Debit Tersedia"), target=lt["available_discharge"], decimals=3,
-             suffix=" m³/s", note=L(f"Required {d.hydraulic['required_discharge']:.3f} m³/s (DEMO model)",
-                                    f"Dibutuhkan {d.hydraulic['required_discharge']:.3f} m³/s (model DEMO)"),
+             suffix=" m³/s", bars=[(100, "#3aa7d6"), (100 * req / avail if avail > 0 else 100, "#f5c969")],
+             note=L(f"Required {req:.3f} m³/s (DEMO model)", f"Dibutuhkan {req:.3f} m³/s (model DEMO)"),
              badge_text=ok(q_ok, L("Sufficient", "Cukup"), L("Short", "Kurang")), badge_kind=ok(q_ok, "ok", "warn"),
              color=ok(q_ok, "blue", "orange")),
         dict(icon="🌾", title=L("Crop Water Requirement", "Kebutuhan Air Tanaman"), target=lt["crop_water_requirement"],
@@ -110,7 +154,7 @@ def _legacy_cards(d, lt):
         dict(icon="🛡️", title=L("System Status", "Status Sistem"), value_text="NORMAL" if normal else L("ATTENTION", "PERHATIAN"),
              note=L("No active alerts", "Tidak ada peringatan aktif") if normal else L("Operator validation needed", "Perlu validasi operator"),
              badge_text="Normal" if normal else L("Attention", "Perhatian"), badge_kind=ok(normal, "ok", "warn"),
-             color=ok(normal, "green", "red")),
+             color=ok(normal, "green", "red"), cls="k-status" if normal else ""),
     ], columns=3)
 
 

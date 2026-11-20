@@ -19,14 +19,15 @@ def theme_for(dark: bool) -> dict:
     IS_DARK = dark
     return {
         "dark": IS_DARK,
-        "bg": "#0B1220" if IS_DARK else "#F4F7FB",
-        "panel": "#111B2C" if IS_DARK else "#FFFFFF",
-        "panel2": "#0F1A2A" if IS_DARK else "#F8FAFD",
-        "sidebar": "#080F1A" if IS_DARK else "#FFFFFF",
-        "text": "#E8EEF8" if IS_DARK else "#172033",
-        "muted": "#94A3B8" if IS_DARK else "#667085",
-        "border": "#24324A" if IS_DARK else "#DCE3ED",
-        "grid": "rgba(148,163,184,.12)" if IS_DARK else "rgba(71,85,105,.12)",
+        # Mode gelap = Deep Ocean (lihat ocean_theme.py): panel kaca semi-transparan di atas gradasi; panel2 solid untuk tooltip/popover.
+        "bg": "#000309" if IS_DARK else "#F4F7FB",
+        "panel": "rgba(6,18,34,.62)" if IS_DARK else "#FFFFFF",
+        "panel2": "#0A1B30" if IS_DARK else "#F8FAFD",
+        "sidebar": "rgba(3,10,21,.82)" if IS_DARK else "#FFFFFF",
+        "text": "#E6EEF6" if IS_DARK else "#172033",
+        "muted": "#9BB2C6" if IS_DARK else "#667085",
+        "border": "rgba(120,170,210,.22)" if IS_DARK else "#DCE3ED",
+        "grid": "rgba(120,170,210,.14)" if IS_DARK else "rgba(71,85,105,.12)",
     }
 
 
