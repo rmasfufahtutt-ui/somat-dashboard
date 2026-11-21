@@ -19,7 +19,6 @@ import db  # noqa: E402
 import demo_mode  # noqa: E402
 import store  # noqa: E402
 import derive  # noqa: E402
-import ocean_theme  # noqa: E402
 import repository  # noqa: E402
 import styles  # noqa: E402
 import ui_kit  # noqa: E402
@@ -91,9 +90,7 @@ COLLAPSED = bool(st.session_state["sb_collapsed"])
 IS_DARK = not bool(st.session_state["light_mode"])
 # build_css() sudah membungkus dirinya dengan <style>...</style>; bungkus ganda membuat CSS ui_kit bocor jadi teks.
 # Satu blok <style> saja, tanpa baris kosong.
-_css = (ocean_theme.FONT_IMPORT + "\n"   # @import harus paling awal di blok <style>
-        + styles.build_css(IS_DARK, COLLAPSED).replace("<style>", "").replace("</style>", "") + "\n" + ui_kit.ui_css(IS_DARK)
-        + "\n" + ocean_theme.global_css(IS_DARK))
+_css = styles.build_css(IS_DARK, COLLAPSED).replace("<style>", "").replace("</style>", "") + "\n" + ui_kit.ui_css(IS_DARK)
 _css = "\n".join(ln for ln in _css.splitlines() if ln.strip())
 st.markdown(f"<style>\n{_css}\n</style>", unsafe_allow_html=True)
 
@@ -171,7 +168,7 @@ st.button("Toggle sidebar", key="sb_toggle", on_click=_toggle_sidebar,
 # ---------------- data: HANYA membaca snapshot ----------------
 SNAP = HUB.snapshot()
 D = derive.get(SNAP, allow_simulation=demo_mode.is_demo())   # ruang operasional: tanpa fallback simulasi (H06)
-CTX = SimpleNamespace(hub=HUB, settings=SETTINGS, snap=SNAP, d=D, user=user, nav_allowed=None)
+CTX = SimpleNamespace(hub=HUB, settings=SETTINGS, snap=SNAP, d=D, user=user)
 
 
 def _age(state):
@@ -203,17 +200,12 @@ with st.sidebar:
         if D.is_real:
             st.success(L("Live sensor data", "Data sensor live"))
         else:
-            st.warning(L("⚠️ DEMO / non-field data in use", "⚠️ Data DEMO / non-lapangan dipakai"))
-    # Menu: satu wadah ber-key "nav". Item seragam (tinggi/jarak diatur CSS), label grup dan indikator aktif digambar CSS
-    # (ocean_theme.nav_css), sehingga indikator meluncur saat halaman berganti. Key tombol tetap nav_<halaman>.
-    with st.container(key="nav"):
-        for pid, icon, label in nav_items:
-            st.button(label, icon=ocean_theme.NAV_ICONS.get(pid), key=f"nav_{pid}", help=label if COLLAPSED else None,
-                      type="primary" if st.session_state["page"] == pid else "secondary", width="stretch",
-                      on_click=_set_page, args=(pid,))
-    CTX.nav_allowed = {p for p, _i, _t in nav_items}
-    st.markdown("<style>\n" + ocean_theme.nav_css(IS_DARK, COLLAPSED, [p for p, _i, _t in nav_items], st.session_state["page"], LANG)
-                + "\n" + ocean_theme.steps_css(IS_DARK, LANG) + "\n</style>", unsafe_allow_html=True)
+            st.error(L("⚠️ DEMO / non-field data in use", "⚠️ Data DEMO / non-lapangan dipakai"))
+        st.markdown("#### Menu")
+    for pid, icon, label in nav_items:
+        st.button(icon if COLLAPSED else f"{icon}  {label}", key=f"nav_{pid}", help=label if COLLAPSED else None,
+                  type="primary" if st.session_state["page"] == pid else "secondary", width="stretch",
+                  on_click=_set_page, args=(pid,))
     u = auth.current_user()
     if u:
         av = html.escape(u.get("avatar_data") or "", quote=True)
