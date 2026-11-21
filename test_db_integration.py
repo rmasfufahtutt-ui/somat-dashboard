@@ -14,6 +14,15 @@ URL = os.environ.get("TEST_DATABASE_URL", "")
 pytestmark = pytest.mark.skipif("test" not in URL.rsplit("/", 1)[-1], reason="TEST_DATABASE_URL (nama DB mengandung 'test') tidak diisi")
 
 
+@pytest.fixture(autouse=True)
+def _admin_session():
+    """Tes ini memanggil repositori langsung (tanpa sesi Streamlit): tulis sebagai admin; hak dites di test_rights.py."""
+    import rights
+    rights.force(("admin", "admin"))
+    yield
+    rights.force(None)
+
+
 def test_full_flow():
     import psycopg2
     c = psycopg2.connect(URL)
@@ -84,10 +93,19 @@ def test_full_flow():
     with pytest.raises(repo.DecisionError) as ei:
         repo.record_decision(rec_id, "admin", "DELAY", 0, 0, "", "key-2")
     assert ei.value.code == "already_handled"
-    # rekomendasi baru lalu observasi h baru -> inputs_changed
-    out2 = rsvc.run_and_publish(repo, "P1", Snap2, "admin", S())
+    # H11: irigasi yang sudah DISETUJUI sejak h dibaca membuat rekomendasi baru tidak dapat direkonstruksi -> bukan operasional
+    blocked = rsvc.run_and_publish(repo, "P1", Snap2, "admin", S())
     assert repo.get_run(rec_id)["status"] == "DECIDED"
-    repo.add_h_observation("P1", -15.0, NOW - timedelta(minutes=5), "admin")
+    with pytest.raises(repo.DecisionError) as ei:
+        repo.record_decision(blocked["rec_id"], "admin", "APPROVE", 5, 1, "", "key-3a")
+    assert ei.value.code == "not_operational"
+    # h baru dibaca SESUDAH keputusan (waktu mengikuti jam server basis data, bukan jam PC) -> rekomendasi kembali operasional;
+    # lalu observasi h lain masuk -> inputs_changed
+    t_dec = db.db_query("SELECT ts FROM decisions WHERE id=%s", (did,))[0]["ts"]
+    repo.add_h_observation("P1", -15.0, t_dec + timedelta(seconds=1), "admin")
+    out2 = rsvc.run_and_publish(repo, "P1", Snap2, "admin", S(), decision_at=t_dec + timedelta(seconds=2))
+    assert repo.get_run(rec_id)["status"] == "DECIDED"
+    repo.add_h_observation("P1", -15.5, t_dec + timedelta(seconds=3), "admin")
     with pytest.raises(repo.DecisionError) as ei:
         repo.record_decision(out2["rec_id"], "admin", "APPROVE", 5, 1, "", "key-3")
     assert ei.value.code == "inputs_changed"

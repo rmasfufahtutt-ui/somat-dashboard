@@ -71,6 +71,7 @@ def pgdb(monkeypatch):
         c.close()
         db.configure(url)
         assert db.ensure_ready(), db.last_error()
+        db.run_migrations()      # ensure_ready() mengingat _READY dari tes sebelumnya; skema baru saja dihapus, jadi migrasi wajib diulang
         try:
             yield repo
         finally:
