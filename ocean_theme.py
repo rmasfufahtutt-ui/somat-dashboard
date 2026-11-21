@@ -243,11 +243,11 @@ def sensor_trio(soil: dict, canal: dict, rain: dict) -> str:
 # ------------------------------------------------------------------ navigasi + langkah
 NAV_H, NAV_GAP, GROUP_M = 40, 2, 26
 NAV_GROUPS = {"overview": "monitor", "monitoring": "monitor", "prediction": "decide", "operator": "decide",
-              "observations": "field", "execution": "field", "alerts": "field", "account": "account", "admin": "account"}
+              "observations": "field", "execution": "field", "alerts": "field", "manual": "account", "account": "account", "admin": "account"}
 GROUP_LABELS = {"monitor": ("Monitor", "Pantau"), "decide": ("Decide", "Putuskan"), "field": ("Field", "Lapangan"), "account": ("Account", "Akun")}
 NAV_ICONS = {"overview": ":material/dashboard:", "monitoring": ":material/sensors:", "prediction": ":material/trending_up:",
              "operator": ":material/fact_check:", "observations": ":material/location_on:", "execution": ":material/water_drop:",
-             "alerts": ":material/notifications:", "account": ":material/person:", "admin": ":material/shield:"}
+             "alerts": ":material/notifications:", "manual": ":material/menu_book:", "account": ":material/person:", "admin": ":material/shield:"}
 STEPS = (("observe", "1", "Observe", "Amati", "monitoring", "Sensor Monitoring", "Monitoring Sensor"),
          ("predict", "2", "Predict", "Prediksi", "prediction", "Prediction & Recommendation", "Prediksi & Rekomendasi"),
          ("decide", "3", "Decide", "Putuskan", "operator", "Operator Decision", "Keputusan Operator"),
