@@ -283,6 +283,20 @@ def events_since_observation(repo, plot_id: str, observed_at: Optional[datetime]
     return out
 
 
+def bias_shadow(repo, plot_id: str, decision_at: datetime) -> Optional[dict]:
+    """Status bias adaptif M1B per petak PADA waktu keputusan, dicatat di snapshot untuk audit. `applied` selalu False:
+    bias belum dibekukan sebagai parameter operasional, jadi nilainya TIDAK mengubah angka rekomendasi (M0/M1). Hanya
+    jalur operasional (Neon) punya state bias; DEMO tidak (None). Kegagalan baca tidak menggagalkan rekomendasi."""
+    fn = getattr(repo, "bias_for_issue_db", None)
+    if fn is None:
+        return None
+    try:
+        b, status, info = fn(plot_id, "M1B", decision_at)
+    except Exception as e:
+        return {"model": "M1B", "applied": False, "status": "UNAVAILABLE", "error": type(e).__name__}
+    return {"model": "M1B", "applied": False, "status": status, "bias_mm_day": float(b), **(info or {})}
+
+
 def gather_inputs(repo, plot_id: str, snapshot, decision_at: datetime) -> dict:
     plot = repo.get_plot(plot_id)
     profile = repo.get_active_profile(plot_id, decision_at)
@@ -307,7 +321,7 @@ def gather_inputs(repo, plot_id: str, snapshot, decision_at: datetime) -> dict:
         since_obs["rain_mm"] = rain_since_observation(getattr(snapshot, "sensor_df", None),
                                                       (plot or {}).get("rain_source_id"), obs_at, _aware(decision_at))
     return {"plot": plot, "profile": profile, "cycle": cycle, "h_obs": h_obs, "points": points,
-            "forecast_meta": meta, "since_obs": since_obs}
+            "forecast_meta": meta, "since_obs": since_obs, "bias_info": bias_shadow(repo, plot_id, decision_at)}
 
 
 def run_and_publish(repo, plot_id: str, snapshot, actor: str, settings, decision_at: Optional[datetime] = None) -> dict:

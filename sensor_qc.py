@@ -230,3 +230,20 @@ def describe(code: str, lang: str = "en") -> str:
     if code in SENSOR_CODES:
         return SENSOR_CODES[code][1 if lang == "en" else 2]
     return code
+
+
+def summarize_versioned(rows: list) -> dict:
+    """Ringkas penilaian QC berversi (repository.load_qc_asof): jumlah per tindakan, per versi aturan, dan waktu tersedia
+    terbaru. Fungsi murni; tampilan memakainya agar angka yang ditunjukkan berasal dari tabel observation_qc."""
+    acts = {"USE": 0, "USE_WITH_WARNING": 0, "EXCLUDE_FROM_AUTOMATIC_USE": 0}
+    versions: dict = {}
+    latest = None
+    for r in rows or []:
+        a = r.get("action", "USE")
+        acts[a] = acts.get(a, 0) + 1
+        v = r.get("rule_version") or "?"
+        versions[v] = versions.get(v, 0) + 1
+        t = r.get("available_at")
+        if t is not None and (latest is None or t > latest):
+            latest = t
+    return {"n": sum(acts.values()), "actions": acts, "rule_versions": versions, "latest_available_at": latest}

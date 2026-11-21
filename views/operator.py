@@ -55,6 +55,9 @@ def _submit(run, decision, mm, hours, note, verified=False):
         store.invalidate()
         st.rerun()
         return
+    except PermissionError:
+        st.error(auth.auth_msg("forbidden"))
+        return
     except Exception:
         st.error(auth.auth_msg("db"))
         return
@@ -220,6 +223,9 @@ def _edit_dialog(rec_id):
         except repo.DecisionError as e:
             st.error(texts.decision_error(e.code) if e.code != "not_active"
                      else L("This record is no longer active.", "Catatan ini sudah tidak aktif."))
+            return
+        except PermissionError:
+            st.error(auth.auth_msg("forbidden"))
             return
         except Exception:
             st.error(auth.auth_msg("db"))

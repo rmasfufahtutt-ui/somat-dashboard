@@ -61,6 +61,8 @@ def pgdb(monkeypatch):
     import os
     import repository as repo
     import db
+    import rights
+    rights.force(("admin", "admin"))      # tes DB menulis sebagai admin; hak dites terpisah di test_rights.py
     url = os.environ.get("TEST_DATABASE_URL", "")
     if "test" in url.rsplit("/", 1)[-1] and db.psycopg2 is not None:
         c = db.psycopg2.connect(url)
@@ -69,7 +71,10 @@ def pgdb(monkeypatch):
         c.close()
         db.configure(url)
         assert db.ensure_ready(), db.last_error()
-        yield repo
+        try:
+            yield repo
+        finally:
+            rights.force(None)
         return
     args = os.environ.get("SOMAT_PSQL_SHIM", "")
     if not args:
@@ -81,5 +86,8 @@ def pgdb(monkeypatch):
     monkeypatch.setattr(repo, "transaction", shim.transaction)
     monkeypatch.setattr(repo.db, "execute_values", shim.execute_values)
     monkeypatch.setattr(repo, "J", lambda o: pgshim.JsonLit(repo.clean_json(o)))
-    yield repo
-    shim.close()
+    try:
+        yield repo
+    finally:
+        rights.force(None)
+        shim.close()

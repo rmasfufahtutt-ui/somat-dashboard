@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 
 import db
+import rights
 from db import db_query, transaction
 from physics_engine import decision_blockers
 
@@ -25,6 +26,14 @@ except Exception:                                  # pragma: no cover
 WIB = timezone(timedelta(hours=7))
 PARAM_STATUSES = ("CALIBRATED", "LITERATURE", "EXAMPLE", "PENDING")
 SENSOR_VARIABLE_UNITS = {"soil_moisture": "%", "water_level": "m", "rainfall": "mm"}
+
+
+def _owner_of(table, id_col, id_, user_col):
+    """Pemilik rekaman (untuk aturan koreksi/VOID: pemilik atau admin). None bila rekaman tidak ada."""
+    if id_ is None:
+        return None
+    rows = db_query(f"SELECT {user_col} AS u FROM {table} WHERE {id_col}=%s", (int(id_),))
+    return rows[0]["u"] if rows else None
 
 
 class DecisionError(Exception):
@@ -127,6 +136,7 @@ def get_plot(plot_id):
 def upsert_plot(plot_id, name, actor, latitude=None, longitude=None, elevation_m=None, datum="", pipe_count=None,
                 pipe_location="", soil_sensor_id=None, canal_sensor_id=None, rain_source_id=None, temp_source_id=None,
                 coordinate_source="", active=True):
+    rights.authorize("plot.upsert", actor)
     before = get_plot(plot_id)
     db_query(
         """INSERT INTO plots (plot_id, name, latitude, longitude, elevation_m, datum, pipe_count, pipe_location,
@@ -185,6 +195,7 @@ def save_profile_version(plot_id, params, phases, actor, note="", validation_sta
                          protocol_version=""):
     """Buat versi profil baru (profil lama ditutup). params: [{name,value,unit,status,source,assessment_method,
     checked_by,measured_at}], phases: [{phase,from_das,to_das,protected}]. Mengembalikan profile_id baru."""
+    rights.authorize("profile.save", actor)
     for p in params:
         if p.get("status") not in PARAM_STATUSES:
             raise ValueError(f"status parameter tidak dikenal: {p.get('status')}")
@@ -230,6 +241,7 @@ def list_crop_cycles(plot_id):
 
 
 def add_crop_cycle(plot_id, planting_date, variety, actor):
+    rights.authorize("cycle.add", actor)
     with transaction() as cur:
         cur.execute("UPDATE crop_cycles SET active=FALSE WHERE plot_id=%s AND active", (plot_id,))
         cur.execute("INSERT INTO crop_cycles (plot_id, planting_date, variety, created_by) VALUES (%s,%s,%s,%s) "
@@ -244,6 +256,10 @@ def add_crop_cycle(plot_id, planting_date, variety, actor):
 # ----------------------------------------------------------------------------------------------
 def add_h_observation(plot_id, value_cm, observed_at, actor, note="", quality_flag="OK", supersedes_id=None):
     """Simpan h manual. observed_at (waktu kejadian) dan received_at (waktu input) dicatat terpisah."""
+    if supersedes_id:
+        rights.authorize("observation.correct", actor, _owner_of("observations", "obs_id", supersedes_id, "recorded_by"))
+    else:
+        rights.authorize("observation.add", actor)
     obs_utc = as_utc(observed_at)
     with transaction() as cur:
         cur.execute(
@@ -261,6 +277,7 @@ def add_h_observation(plot_id, value_cm, observed_at, actor, note="", quality_fl
 
 
 def void_observation(obs_id, actor, reason):
+    rights.authorize("observation.void", actor, _owner_of("observations", "obs_id", obs_id, "recorded_by"))
     rows = db_query("UPDATE observations SET record_status='VOID', note = LEFT(note || ' [VOID: ' || %s || ']', 500) "
                     "WHERE obs_id=%s AND record_status='ACTIVE' RETURNING obs_id, plot_id, value", (reason[:200], obs_id))
     if rows:
@@ -566,7 +583,9 @@ def list_pending_runs(plot_id=None):
 def record_decision(rec_id, user, decision, operator_mm, duration_h, note, idempotency_key,
                     duration_verified=False):
     """Catat keputusan operator secara ATOMIK: kunci baris rekomendasi, periksa status/expiry/versi input, tulis
-    keputusan, tandai DECIDED. Kunci idempotensi yang sama mengembalikan hasil sebelumnya (klik ganda aman)."""
+    keputusan, tandai DECIDED. Kunci idempotensi yang sama mengembalikan hasil sebelumnya (klik ganda aman).
+    Hak pengguna diperiksa di sini (backend), sebelum database disentuh."""
+    rights.authorize("decision.record", user)
     with transaction() as cur:
         cur.execute("SELECT id FROM decisions WHERE idempotency_key=%s", (idempotency_key,))
         dup = cur.fetchone()
@@ -630,6 +649,7 @@ def list_decisions(limit=200, plot_id=None, only_active=False):
 
 def supersede_decision(decision_id, actor, decision, operator_mm, duration_h, note, reason):
     """Koreksi keputusan: record baru menggantikan yang lama (yang lama tetap tersimpan, status SUPERSEDED)."""
+    rights.authorize("decision.correct", actor, _owner_of("decisions", "id", decision_id, "username"))
     with transaction() as cur:
         cur.execute("SELECT * FROM decisions WHERE id=%s FOR UPDATE", (int(decision_id),))
         old = cur.fetchone()
@@ -653,6 +673,7 @@ def supersede_decision(decision_id, actor, decision, operator_mm, duration_h, no
 
 
 def void_decision(decision_id, actor, reason):
+    rights.authorize("decision.void", actor)
     rows = db_query(
         "UPDATE decisions SET record_status='VOID', void_reason=%s, voided_by=%s, voided_at=NOW() "
         "WHERE id=%s AND record_status='ACTIVE' RETURNING id, username, decision, operator_mm", (reason[:300], actor, int(decision_id)))
@@ -673,6 +694,10 @@ def decisions_awaiting_execution(plot_id=None):
 def add_irrigation_event(plot_id, decision_id, rec_id, arrived_at, started_at, ended_at, actual_volume_m3,
                          actual_discharge_m3s, measurement_method, h_after_cm, h_after_at, note, actor,
                          supersedes_id=None):
+    if supersedes_id:
+        rights.authorize("execution.correct", actor, _owner_of("irrigation_events", "event_id", supersedes_id, "recorded_by"))
+    else:
+        rights.authorize("execution.add", actor)
     with transaction() as cur:
         cur.execute(
             "INSERT INTO irrigation_events (plot_id, decision_id, rec_id, arrived_at, started_at, ended_at, actual_volume_m3, "
@@ -692,6 +717,7 @@ def _u(ts):
 
 
 def void_irrigation_event(event_id, actor, reason):
+    rights.authorize("execution.void", actor, _owner_of("irrigation_events", "event_id", event_id, "recorded_by"))
     rows = db_query("UPDATE irrigation_events SET record_status='VOID', note=LEFT(note || ' [VOID: ' || %s || ']',500) "
                     "WHERE event_id=%s AND record_status='ACTIVE' RETURNING event_id", (reason[:200], int(event_id)))
     if rows:

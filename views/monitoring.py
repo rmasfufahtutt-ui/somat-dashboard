@@ -1,6 +1,8 @@
 """views/monitoring.py - monitoring sensor + prakiraan BMKG (dari snapshot)."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pandas as pd
 import streamlit as st
 
@@ -13,6 +15,32 @@ from views.overview import mode_banner
 
 _ACTION_TXT = {"USE": ("Use", "Dipakai"), "USE_WITH_WARNING": ("Use with warning", "Dipakai dengan peringatan"),
                "EXCLUDE_FROM_AUTOMATIC_USE": ("Excluded from automatic use", "Tidak dipakai otomatis")}
+
+
+def _versioned_qc_caption(now_local):
+    """Konsumen QC berversi: ringkasan observation_qc (tersedia pada saat ini) bila basis data operasional aktif."""
+    import demo_mode
+    if demo_mode.is_demo():
+        return
+    try:
+        import repo_router as repo
+        since = datetime.now(timezone.utc) - timedelta(hours=24)
+        rows = repo.load_qc_asof(datetime.now(timezone.utc), since)
+    except Exception:
+        st.caption(L("Versioned QC table could not be read; the table above is evaluated on the fly from raw values.",
+                     "Tabel QC berversi tidak terbaca; tabel di atas dinilai ulang dari nilai mentah."))
+        return
+    s = sensor_qc.summarize_versioned(rows)
+    if not s["n"]:
+        st.caption(L("No versioned QC assessments stored for the last 24 h yet.",
+                     "Belum ada penilaian QC berversi tersimpan untuk 24 jam terakhir."))
+        return
+    a = s["actions"]
+    st.caption(L(f"Stored QC (last 24 h, {s['n']} readings): use {a['USE']}, with warning {a['USE_WITH_WARNING']}, "
+                 f"excluded {a['EXCLUDE_FROM_AUTOMATIC_USE']}; rule version(s): {', '.join(sorted(s['rule_versions']))}.",
+                 f"QC tersimpan (24 jam terakhir, {s['n']} pembacaan): dipakai {a['USE']}, dengan peringatan "
+                 f"{a['USE_WITH_WARNING']}, dikeluarkan {a['EXCLUDE_FROM_AUTOMATIC_USE']}; versi aturan: "
+                 f"{', '.join(sorted(s['rule_versions']))}."))
 
 
 def _qc_panel(d):
@@ -37,6 +65,7 @@ def _qc_panel(d):
                 L("Action", "Tindakan"): _ACTION_TXT[r.action][idx],
             })
         table(pd.DataFrame(rows), key="sensor_qc")
+        _versioned_qc_caption(now)
         n_ex = int(getattr(d, "n_qc_excluded", 0) or 0)
         if n_ex:
             st.warning(L(f"{n_ex} reading(s) are excluded from automatic calculations (summary, trends, sensor status). "

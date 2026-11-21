@@ -82,7 +82,7 @@ def test_full_flow():
     did2, dup2 = repo.record_decision(rec_id, "admin", "APPROVE", 1, 1, "ok", "key-1")
     assert did == did2 and dup2
     with pytest.raises(repo.DecisionError) as ei:
-        repo.record_decision(rec_id, "bob", "DELAY", 0, 0, "", "key-2")
+        repo.record_decision(rec_id, "admin", "DELAY", 0, 0, "", "key-2")
     assert ei.value.code == "already_handled"
     # rekomendasi baru lalu observasi h baru -> inputs_changed
     out2 = rsvc.run_and_publish(repo, "P1", Snap2, "admin", S())

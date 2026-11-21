@@ -265,33 +265,40 @@ st.markdown(f'<div class="somat-header"><img src="{styles.LOGO_SRC}" alt="Logo S
             unsafe_allow_html=True)
 
 # ---------------- halaman ----------------
-if page == "overview":
-    from views import overview
-    overview.render(CTX)
-elif page == "monitoring":
-    from views import monitoring
-    monitoring.render(CTX)
-elif page == "prediction":
-    from views import prediction
-    prediction.render(CTX)
-elif page == "alerts":
-    from views import alerts
-    alerts.render(CTX)
-elif page == "operator":
-    from views import operator
-    operator.render(CTX)
-elif page == "observations":
-    from views import observations
-    observations.render(CTX)
-elif page == "execution":
-    from views import execution
-    execution.render(CTX)
-elif page == "account":
-    from views import account
-    account.render()
-elif page == "admin":
-    from views import admin
-    admin.render(HUB, SETTINGS)
+try:
+    if page == "overview":
+        from views import overview
+        overview.render(CTX)
+    elif page == "monitoring":
+        from views import monitoring
+        monitoring.render(CTX)
+    elif page == "prediction":
+        from views import prediction
+        prediction.render(CTX)
+    elif page == "alerts":
+        from views import alerts
+        alerts.render(CTX)
+    elif page == "operator":
+        from views import operator
+        operator.render(CTX)
+    elif page == "observations":
+        from views import observations
+        observations.render(CTX)
+    elif page == "execution":
+        from views import execution
+        execution.render(CTX)
+    elif page == "account":
+        from views import account
+        account.render()
+    elif page == "admin":
+        from views import admin
+        admin.render(HUB, SETTINGS)
+except PermissionError as _pe:      # hak ditolak di backend (repositori): tampilkan pesan, jangan layar galat
+    st.error(auth.auth_msg("forbidden"))
+    try:
+        auth.audit("permission_denied", f"{page}: {_pe}")
+    except Exception:
+        pass
 
 # ---------------- poller: render ulang hanya bila ada data baru (halaman baca-saja) ----------------
 AUTO_PAGES = ("overview", "monitoring", "prediction", "alerts")
