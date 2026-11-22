@@ -91,6 +91,35 @@ def publish(res: dict, pid: str, ctx, actor: str) -> dict:
                                 max_h_age_hours=ctx.settings.max_h_age_hours, model=res["model"], ml_residual=ml_res)
 
 
+def fresh_h_panel(pid: str, res: dict):
+    """Bila demo menunggu h baru (irigasi sejak h terakhir / h usang), tawarkan satu klik pembacaan h SIMULASI
+    agar prediksi, rekomendasi, dan durasi terisi dan keputusan dapat didemonstrasikan seperti kondisi nyata."""
+    if res["out"].get("status") not in demo_service.NEEDS_NEW_H:
+        return
+    st.info(L("**Demo is waiting for a new h reading** — as in the field, after an irrigation (or an old reading) the operator reads h again. "
+              "Record a SIMULATED reading now to fill prediction, recommendation and duration. It is stored in the demo space only (labelled DEMO).",
+              "**Demo menunggu pembacaan h baru** — seperti di lapangan, setelah irigasi (atau bacaan lama) operator membaca h lagi. "
+              "Catat pembacaan SIMULASI sekarang agar prediksi, rekomendasi, dan durasi terisi. Hanya tersimpan di ruang demo (berlabel DEMO)."))
+    if not demo_mode.can("observations"):
+        st.caption(L("Your role cannot record observations.", "Role Anda tidak dapat mencatat pengamatan."))
+        return
+    kn = f"demo_fresh_h_{pid}"
+    fs.keep(kn, demo_service.suggested_fresh_h(pid))
+    c1, c2 = st.columns([1, 2])
+    val = c1.number_input(L("Simulated h now (cm)", "h simulasi sekarang (cm)"), min_value=-60.0, max_value=30.0, step=0.5, key=kn)
+    fs.sync(kn)
+    c2.write("")
+    if c2.button(L("📝 Record simulated h now", "📝 Catat h simulasi sekarang"), type="primary", key=f"demo_fresh_btn_{pid}"):
+        try:
+            demo_service.record_fresh_h(pid, auth.current_user()["username"], float(val))
+            store.invalidate()
+            st.rerun()
+        except PermissionError:
+            st.error(auth.auth_msg("forbidden"))
+        except ValueError as e:
+            st.error(str(e))
+
+
 # ---------------------------------------------------------------------------------------------- label sumber
 def source_badges(res: dict):
     w, snap = res["weather"], res["snapshot"]

@@ -128,6 +128,27 @@ def record_execution(decision_id: int, actor: str, *, arrived_at: datetime, star
                                       supersedes_id=supersedes_id)
 
 
+# Status yang dapat diselesaikan di demo dengan "membaca h baru" (sama seperti operator sungguhan di lapangan)
+NEEDS_NEW_H = ("STATE_NOT_RECONSTRUCTABLE", "STALE_OBSERVATION", "NEEDS_FIELD_OBSERVATION")
+
+
+def suggested_fresh_h(plot_id: str) -> float:
+    """h simulasi yang disarankan untuk pembacaan baru: nilai ideal skenario petak (data_demo), bukan pengukuran."""
+    import demo_data
+    spec = demo_data.SPEC_BY_ID.get(plot_id) or {}
+    return float(spec.get("ideal_h", -12.0))
+
+
+def record_fresh_h(plot_id: str, actor: str, value_cm: Optional[float] = None, now: Optional[datetime] = None) -> int:
+    """Catat pembacaan h SIMULASI pada waktu sekarang agar demo dapat dihitung ulang (origin DEMO_FRESH, bertanda is_demo).
+    Hanya menulis ke ruang demo; tidak menyentuh data operasional. Nilai wajar dibatasi (-60..30 cm)."""
+    v = suggested_fresh_h(plot_id) if value_cm is None else float(value_cm)
+    if not (-60.0 <= v <= 30.0):
+        raise ValueError("h di luar rentang wajar (-60..30 cm)")
+    return drepo.add_h_observation(plot_id, v, _utc(now or drepo.now_utc()), actor,
+                                   "[SIMULASI] pembacaan h baru untuk demo", origin="DEMO_FRESH")
+
+
 def simulated_h_after(plot_id: str, h_arrival_cm: float, applied_mm: float) -> float:
     """h setelah pengisian simulasi: S(h)+I lewat koefisien pengisian profil aktif, dibatasi pematang."""
     prof = drepo.get_active_profile(plot_id)

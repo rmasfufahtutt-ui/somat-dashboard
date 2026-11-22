@@ -91,6 +91,7 @@ def render(ctx):
                             "pilih sumber suhu, skenario hujan, dan model; mesinnya sama dengan operasional."))
             res = demo_panels.preview(ctx, pid)
             demo_panels.source_badges(res)
+            demo_panels.fresh_h_panel(pid, res)
             _recommendation_block(ctx, pid, res["out"], res["snapshot"], res["profile"], demo_res=res)
             demo_panels.explain(res)
             demo_panels.ai_panel(ctx, pid, res)
