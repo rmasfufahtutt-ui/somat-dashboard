@@ -1,38 +1,42 @@
 ﻿# SOMAT Release Log
 
-## Rilis 2026-11-24 08:09 (+07:00)
+## Pembaruan 2026-11-24 08:59 (+07:00): uji konflik dua operator
 
-- **Commit:** `0b8ef27` (sebelumnya `b4856a7`)
-- **Isi perubahan:** panel "Catat h simulasi sekarang" di tab Prediksi (`demo_service.py`, `views/demo_panels.py`, `views/prediction.py`, `test_demo_fresh_h.py`)
+- **Commit:** 4b58100 (menambah test_two_operator_conflict.py)
+- **Lingkungan:** Neon branch uji, database somat_test, koneksi direct. BUKAN produksi.
 
 ### Bukti tes
 
-| Tes | Hasil | Lingkungan | Catatan |
-|---|---|---|---|
-| Tes DB | 21 passed | Neon **branch uji** (db `somat_test`) | Ini BUKAN uji migrasi produksi |
-| Tes unit/aplikasi | 392 passed, 0 skipped | Komputer lokal (venv) | Dilaporkan oleh pemilik proyek |
+| Tes | Hasil | Catatan |
+|---|---|---|
+| test_two_operator_conflict.py | 2 passed (20 detik) | 5 putaran per tes |
+| Seluruh tes dengan TEST_DATABASE_URL terpasang | 394 passed, 0 skipped (152 detik) | Dijalankan langsung, keluaran pytest dilihat |
 
-Catatan: angka tes dilaporkan dari proses sebelumnya dan tidak dijalankan ulang saat log ini dibuat.
+Yang terbukti pada SQL sungguhan: dua permintaan serentak dengan kunci idempotensi berbeda menghasilkan tepat satu keputusan (yang kalah mendapat already_handled), status akhir DECIDED; klik ganda serentak dengan kunci sama tidak menggandakan keputusan.
 
-### Dikonfirmasi pemilik proyek pada 2026-11-24
+Batas tes: kedua permintaan memakai user admin, jadi bukan uji dua peran berbeda (peran dicakup test_rights.py). Lima putaran bukan bukti mutlak tanpa balapan. Kesesuaian dengan Handbook v1.3 (aturan konflik) BELUM diverifikasi.
 
-- GitHub Actions "SOMAT ingest": run lewat Run workflow berstatus **hijau** (Secrets dan Variable sudah diisi)
-- Password Neon sudah direset dan diperbarui di GitHub Secret, Streamlit Secrets, dan env lokal
-- Demo di web (Prediksi -> DEMO-P01 -> "Catat h simulasi sekarang"): kartu prediksi h, irigasi, dan durasi **terisi tepat**
+### Keamanan
 
-Catatan: konfirmasi di atas berasal dari laporan pemilik proyek, bukan dari bukti terlampir (log/screenshot belum disimpan di repo).
+- Password Neon direset ulang pada 2026-11-24 di branch production dan branch uji. GitHub Secret, Streamlit Secrets, dan env lokal diperbarui, dan SOMAT ingest hijau setelahnya (dilaporkan pemilik proyek).
 
 ### Belum diuji / belum terbukti
 
-- Migrasi di database produksi (branch production, db `neondb`)
+- Migrasi di database produksi (branch production, db neondb)
 - Alur lewat browser dan ponsel
-- Konflik dua operator (keputusan bersamaan)
-
-### Catatan keamanan yang masih terbuka
-
-- Rotasi kunci sensor: ditunda, **wajib** sebelum sensor fisik dipasang
+- Dua operator dengan peran berbeda; kesesuaian aturan konflik dengan Handbook v1.3
 
 ### Catatan data
 
 - Data DEMO/DUMMY berlabel dan terpisah dari data riset/operasional; dummy lama sudah di-VOID (append-only)
 - Spesifikasi pipa AWD masih PENDING
+- Rotasi kunci sensor: ditunda, WAJIB sebelum sensor fisik dipasang
+
+---
+
+## Rilis 2026-11-24 08:09 (+07:00)
+
+- **Commit:** 0b8ef27 (sebelumnya b4856a7)
+- **Isi perubahan:** panel "Catat h simulasi sekarang" di tab Prediksi (demo_service.py, views/demo_panels.py, views/prediction.py, test_demo_fresh_h.py)
+- **Bukti tes:** 392 passed, 0 skipped (lokal, dengan DB uji); 21 tes DB lulus di branch uji yang lama (sudah kedaluwarsa dan dihapus)
+- **Dikonfirmasi pemilik proyek:** ingest GitHub Actions hijau; demo DEMO-P01 kartu prediksi terisi tepat (laporan pemilik, tanpa bukti terlampir di repo)
