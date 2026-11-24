@@ -49,3 +49,13 @@ Batas tes: kedua permintaan memakai user admin, jadi bukan uji dua peran berbeda
 - **Sumber aturan:** keputusan pemilik proyek. Kesesuaian dengan bunyi Handbook v1.3 belum diverifikasi; jika belum tercantum, tambahkan pada revisi Handbook berikutnya.
 - **Bukti:** perilaku kode sesuai aturan ini pada SQL sungguhan di branch uji (test_two_operator_conflict.py, 2 passed).
 - **Belum diuji:** jalur koreksi setelah konflik (operator yang kalah memperbaiki lewat supersede), dan dua peran berbeda.
+
+---
+
+## Pembaruan 2026-11-24: uji koreksi setelah konflik
+
+- **Lingkungan:** Neon branch uji, database somat_test, koneksi direct. BUKAN produksi.
+- **Hasil:** test_two_operator_conflict.py = 5 passed (47 detik), keluaran pytest dilihat langsung.
+- **Terbukti pada SQL sungguhan:** setelah konflik, koreksi lewat supersede_decision menyisakan riwayat utuh (lama SUPERSEDED, baru ACTIVE, supersedes_id benar, tepat satu aktif); dua koreksi serentak menghasilkan satu pemenang dan satu not_active; keputusan VOID tidak bisa dikoreksi dan tidak bisa di-VOID dua kali.
+- **Batas:** semua permintaan memakai user admin, sehingga hak akses per peran tidak diuji di sini (dicakup test_rights.py). Lima putaran bukan bukti mutlak tanpa balapan. Seluruh tes belum dijalankan ulang setelah penambahan ini.
+- **Belum diuji:** migrasi produksi; alur browser dan ponsel; dua operator dengan peran berbeda.
