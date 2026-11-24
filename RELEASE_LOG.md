@@ -40,3 +40,12 @@ Batas tes: kedua permintaan memakai user admin, jadi bukan uji dua peran berbeda
 - **Isi perubahan:** panel "Catat h simulasi sekarang" di tab Prediksi (demo_service.py, views/demo_panels.py, views/prediction.py, test_demo_fresh_h.py)
 - **Bukti tes:** 392 passed, 0 skipped (lokal, dengan DB uji); 21 tes DB lulus di branch uji yang lama (sudah kedaluwarsa dan dihapus)
 - **Dikonfirmasi pemilik proyek:** ingest GitHub Actions hijau; demo DEMO-P01 kartu prediksi terisi tepat (laporan pemilik, tanpa bukti terlampir di repo)
+
+---
+
+## Catatan keputusan desain 2026-11-24: konflik dua operator
+
+- **Aturan:** jika dua operator memutuskan rekomendasi yang sama, yang pertama tercatat menang dan yang kedua ditolak (already_handled). Kekeliruan dikoreksi lewat jalur koreksi (supersede) atau VOID, bukan lewat keputusan kedua.
+- **Sumber aturan:** keputusan pemilik proyek. Kesesuaian dengan bunyi Handbook v1.3 belum diverifikasi; jika belum tercantum, tambahkan pada revisi Handbook berikutnya.
+- **Bukti:** perilaku kode sesuai aturan ini pada SQL sungguhan di branch uji (test_two_operator_conflict.py, 2 passed).
+- **Belum diuji:** jalur koreksi setelah konflik (operator yang kalah memperbaiki lewat supersede), dan dua peran berbeda.
