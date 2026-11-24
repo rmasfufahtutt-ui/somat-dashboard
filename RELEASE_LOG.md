@@ -12,19 +12,24 @@
 | Tes DB | 21 passed | Neon **branch uji** (db `somat_test`) | Ini BUKAN uji migrasi produksi |
 | Tes unit/aplikasi | 392 passed, 0 skipped | Komputer lokal (venv) | Dilaporkan oleh pemilik proyek |
 
-Catatan: angka di atas dilaporkan dari proses sebelumnya dan tidak dijalankan ulang saat log ini dibuat.
+Catatan: angka tes dilaporkan dari proses sebelumnya dan tidak dijalankan ulang saat log ini dibuat.
+
+### Dikonfirmasi pemilik proyek pada 2026-11-24
+
+- GitHub Actions "SOMAT ingest": run lewat Run workflow berstatus **hijau** (Secrets dan Variable sudah diisi)
+- Password Neon sudah direset dan diperbarui di GitHub Secret, Streamlit Secrets, dan env lokal
+- Demo di web (Prediksi -> DEMO-P01 -> "Catat h simulasi sekarang"): kartu prediksi h, irigasi, dan durasi **terisi tepat**
+
+Catatan: konfirmasi di atas berasal dari laporan pemilik proyek, bukan dari bukti terlampir (log/screenshot belum disimpan di repo).
 
 ### Belum diuji / belum terbukti
 
 - Migrasi di database produksi (branch production, db `neondb`)
 - Alur lewat browser dan ponsel
 - Konflik dua operator (keputusan bersamaan)
-- Tampilan demo di web: Prediksi -> DEMO-P01 -> "Catat h simulasi sekarang" (belum ada screenshot)
-- GitHub Actions "SOMAT ingest": status merah (exit code 2) sampai Secrets/Variable diisi dan dijalankan ulang lewat Run workflow. Belum ada konfirmasi hijau.
 
 ### Catatan keamanan yang masih terbuka
 
-- Konfirmasi reset password Neon dan pembaruan di GitHub Secret, Streamlit Secrets, serta env lokal: **belum dikonfirmasi**
 - Rotasi kunci sensor: ditunda, **wajib** sebelum sensor fisik dipasang
 
 ### Catatan data
