@@ -176,3 +176,16 @@ def test_status_run_di_engine_diutamakan_daripada_profil():
     out = {"status": "MISSING_PARAMETER", "parameter_status": {"a": "PENDING"}}
     profile = {"params": {"b": {"status": "PENDING"}}}
     assert explain.pending_parameters(out, profile) == ["a"]
+
+
+def test_waktu_pengamatan_ditampilkan_dalam_wib_seperti_kartu():
+    snap = {"h_observation": {"value": -11.7, "observed_at": datetime(2026, 11, 25, 9, 0, tzinfo=timezone.utc)}}
+    h = explain.input_summary(snap, {}, now=NOW)[0]
+    assert "2026-11-25 16:00 WIB" in h["value"][0] and "2026-11-25 16:00 WIB" in h["value"][1]
+    assert "+0000" not in h["value"][0]
+
+
+def test_waktu_tanpa_zona_dianggap_wib():
+    snap = {"h_observation": {"value": -5, "observed_at": datetime(2026, 11, 25, 16, 0)}}
+    h = explain.input_summary(snap, {}, now=NOW)[0]
+    assert "2026-11-25 16:00 WIB" in h["value"][0]

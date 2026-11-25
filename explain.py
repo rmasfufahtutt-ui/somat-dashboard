@@ -4,12 +4,13 @@ Teks dikembalikan sebagai pasangan (Inggris, Indonesia); tampilan memakainya lew
 Modul ini TIDAK mengubah perhitungan: hanya menyusun ulang apa yang sudah dihasilkan engine agar mudah
 dibaca operator dan ditelusuri penguji. Kata "validated/tervalidasi" hanya dipakai untuk run_mode yang memang tervalidasi.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import physics_engine as pe
 import texts
 
 VALIDATED_MODES = ("BASELINE_VALIDATED", "ML_VALIDATED")
+WIB = timezone(timedelta(hours=7))             # sama dengan ui_kit.fmt_ts: waktu ditampilkan dalam WIB
 
 _SUMMARY = {
     "DEMO": ("DEMO run: example inputs only. It cannot be decided operationally.",
@@ -109,10 +110,13 @@ def _age_hours(observed_at, now=None):
 
 
 def _fmt_dt(v):
+    """Waktu dalam WIB, selaras dengan kartu 'h lapangan terakhir' (ui_kit.fmt_ts). Tanpa zona waktu dianggap WIB."""
     dt = _to_dt(v)
     if dt is None:
         return str(v)
-    return dt.strftime("%Y-%m-%d %H:%M %z").strip() if dt.tzinfo else dt.strftime("%Y-%m-%d %H:%M")
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(WIB)
+    return dt.strftime("%Y-%m-%d %H:%M") + " WIB"
 
 
 def _num(v):
