@@ -167,6 +167,13 @@ def build_css(dark: bool, collapsed: bool) -> str:
     div[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]){background:#E8F8EE!important;border-color:#A7E0BC;}
     div[data-testid="stAlert"]:has([data-testid="stAlertContentInfo"]){background:#E8F1FD!important;border-color:#AFCBF5;}
     div[data-testid="stAlert"]:has([data-testid="stAlertContentError"]){background:#FDECEC!important;border-color:#F3B4B4;}
+    [data-testid="stAlertContainer"]{border:1px solid __BORDER__;}
+    [data-testid="stAlertContainer"]:has([data-testid="stAlertContentWarning"]){background:#FFF6DD!important;border-color:#F3D98B!important;}
+    [data-testid="stAlertContainer"]:has([data-testid="stAlertContentSuccess"]){background:#E8F8EE!important;border-color:#A7E0BC!important;}
+    [data-testid="stAlertContainer"]:has([data-testid="stAlertContentInfo"]){background:#E8F1FD!important;border-color:#AFCBF5!important;}
+    [data-testid="stAlertContainer"]:has([data-testid="stAlertContentError"]){background:#FDECEC!important;border-color:#F3B4B4!important;}
+    /* tabel: kanvas data-grid memakai tema bawaan Streamlit (gelap), jadi dibalik hanya di mode terang */
+    [data-testid="stDataFrame"] canvas{filter:invert(1) hue-rotate(180deg);}
     /* expander */
     div[data-testid="stExpander"],div[data-testid="stExpander"] details{background:__PANEL__!important;border-color:__BORDER__!important;}
     div[data-testid="stExpander"] summary,div[data-testid="stExpander"] summary *{color:__TEXT__!important;}

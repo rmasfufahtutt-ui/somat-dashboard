@@ -257,7 +257,8 @@ if demo_mode.is_demo():
         st.session_state["_demo_ready_at"] = _now_t
         if _r["actions"]:
             store.invalidate()
-    st.markdown(f'<div class="demo-banner" role="status" style="background:#7C2D12;color:#FFEDD5;border-left:6px solid #F97316;'
+    _bn_bg, _bn_fg = ("#7C2D12", "#FFEDD5") if IS_DARK else ("#FFEDD5", "#7C2D12")
+    st.markdown(f'<div class="demo-banner" role="status" style="background:{_bn_bg};color:{_bn_fg} !important;border-left:6px solid #F97316;'
                 f'padding:.55rem .9rem;border-radius:8px;margin-bottom:.5rem;font-weight:600">'
                 f'{html.escape(L(demo_mode.BANNER_EN, demo_mode.BANNER_ID))}</div>', unsafe_allow_html=True)
 st.markdown(f'<div class="somat-header"><img src="{styles.LOGO_SRC}" alt="Logo SOMAT"><div>'
