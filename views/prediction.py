@@ -106,6 +106,7 @@ def render(ctx):
 
 
 def _recommendation_block(ctx, pid, out, snapshot, profile, demo_res=None):
+    import explain
     mode = out.get("run_mode", "MANUAL_REQUIRED")
     banner(f"{chip(mode, texts.RUN_KIND.get(mode, 'info'))} {texts.run_mode_label(mode)} · "
            f"{texts.status_label(out['status'])}", texts.RUN_KIND.get(mode, "info"))
@@ -123,11 +124,14 @@ def _recommendation_block(ctx, pid, out, snapshot, profile, demo_res=None):
         dict(icon="🚰", title=L("Duration", "Durasi"), value_text=f"{fmt_num(out.get('duration_h'))} h" if out.get("duration_h") else "—",
              note=(L("arrives ", "tiba ") + fmt_ts(out["arrival_at"])) if out.get("arrival_at") else "", color="orange"),
     ], columns=4)
+    st.caption(L(*explain.status_summary(out)))
     for r in out.get("reasons") or []:
         st.markdown(f"- {r}")
-    for i in out.get("issues") or []:
-        if i.get("code") in texts.ISSUE:
-            st.caption("• " + texts.issue_text(i))
+    for _iss in explain.visible_issues(out):
+        st.caption("\u2022 " + L(*_iss))
+    with st.expander(L("Inputs used by this run", "Input yang dipakai run ini")):
+        for _r in explain.input_summary(snapshot, out, profile):
+            st.markdown(f"**{L(*_r['label'])}:** {L(*_r['value'])}")
 
     fig = _trajectory_fig(out)
     if fig is not None:
@@ -165,6 +169,8 @@ def _recommendation_block(ctx, pid, out, snapshot, profile, demo_res=None):
             except Exception:
                 st.error(auth.auth_msg("db"))
         if not can_pub:
+            for _code, _txt in explain.hold_reasons(out, demo=demo_res is not None):
+                st.caption("\u2022 " + L(*_txt))
             st.caption(L("Only baseline runs with real parameters can be published for decision (not DEMO / manual-required).",
                          "Hanya run baseline berparameter nyata yang dapat diterbitkan untuk keputusan (bukan DEMO / perlu-manual).")
                        if demo_res is None else
