@@ -169,7 +169,7 @@ def _recommendation_block(ctx, pid, out, snapshot, profile, demo_res=None):
             except Exception:
                 st.error(auth.auth_msg("db"))
         if not can_pub:
-            for _code, _txt in explain.hold_reasons(out, demo=demo_res is not None):
+            for _code, _txt in explain.hold_reasons(out, demo=demo_res is not None, profile=profile):
                 st.caption("\u2022 " + L(*_txt))
             st.caption(L("Only baseline runs with real parameters can be published for decision (not DEMO / manual-required).",
                          "Hanya run baseline berparameter nyata yang dapat diterbitkan untuk keputusan (bukan DEMO / perlu-manual).")

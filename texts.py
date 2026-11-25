@@ -44,6 +44,10 @@ ISSUE = {
     "BAD_AMOUNT": ("Amount is not a valid number.", "Jumlah bukan angka yang sah."),
     "EXCEEDS_CAP": ("Amount exceeds what the bund height allows.", "Jumlah melebihi yang diizinkan tinggi pematang."),
     "DURATION_INCONSISTENT": ("Duration is inconsistent with volume and plot discharge.", "Durasi tidak konsisten dengan volume dan debit petak."),
+    "NO_DRIVERS": ("ET0 / forecast not yet available.", "ET0 / prakiraan belum tersedia."),
+    "OUT_OF_DOMAIN": ("A parameter value is outside its allowed range.", "Nilai parameter di luar rentang yang diizinkan."),
+    "TARGET_NOT_ABOVE_TRIGGER": ("Target h is not above the trigger h.", "h target tidak lebih tinggi dari h pemicu."),
+    "TARGET_ABOVE_CAP": ("Target h is above the plot's h cap.", "h target melebihi batas h (h cap) petak."),
 }
 DECISION_ERR = {
     "not_found": ("Recommendation not found.", "Rekomendasi tidak ditemukan."),

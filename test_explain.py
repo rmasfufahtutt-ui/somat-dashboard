@@ -114,3 +114,65 @@ def test_input_summary_tidak_memuat_nilai_parameter():
     out = {"parameter_status": {"diameter_pipa": "PENDING"}}
     teks = str(explain.input_summary({}, out, now=NOW))
     assert "diameter_pipa" not in teks
+
+
+# ---- tahap lanjutan: isu tanpa deskripsi, duplikat status, parameter dari profil ----
+import re
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent
+
+
+def _kode_isu_dari_sumber():
+    """Kode isu yang ditulis engine/service di kode sumber (pola fail(status, KODE, ...), {"code": KODE}, _manual(KODE, ...))."""
+    pe_src = (_ROOT / "physics_engine.py").read_text(encoding="utf-8")
+    v2 = pe_src[pe_src.index("def recommend_timed"):]
+    svc = (_ROOT / "recommendation_service.py").read_text(encoding="utf-8")
+    kode = set(re.findall(r'fail\(\s*"[A-Z_]+"\s*,\s*"([A-Z_]+)"', v2))
+    kode |= set(re.findall(r'"code":\s*"([A-Z_]+)"', v2))
+    kode |= set(re.findall(r'"code":\s*"([A-Z_]+)"', svc))
+    kode |= set(re.findall(r'_manual\(\s*"([A-Z_]+)"', svc))
+    return kode
+
+
+def test_semua_kode_isu_engine_punya_teks():
+    kode = _kode_isu_dari_sumber()
+    assert len(kode) >= 10, f"pemindai kode isu tidak menemukan cukup kode: {sorted(kode)}"
+    kurang = sorted(c for c in kode if c not in texts.ISSUE and c not in texts.STATUS)
+    assert not kurang, f"kode isu tanpa teks di texts.ISSUE/STATUS: {kurang}"
+
+
+def test_isu_sama_dengan_status_tidak_diulang_tetapi_isu_lain_tetap_tampil():
+    out = {"status": "MISSING_PARAMETER",
+           "issues": [{"code": "MISSING_PARAMETER"}, {"code": "NO_H_OBSERVATION"}, {"code": "ZZ_ISU_BARU"}]}
+    res = explain.visible_issues(out)
+    assert len(res) == 2
+    assert res[0] == texts.ISSUE["NO_H_OBSERVATION"]
+    assert "ZZ_ISU_BARU" in res[1][0]
+
+
+def test_isu_tanpa_teks_isu_memakai_label_status():
+    out = {"status": "OK", "issues": [{"code": "STALE_OBSERVATION"}]}
+    assert explain.visible_issues(out) == [texts.STATUS["STALE_OBSERVATION"]]
+
+
+def test_isu_menampilkan_nama_parameter():
+    out = {"status": "INVALID_PARAMETER", "issues": [{"code": "OUT_OF_DOMAIN", "param": "mu_fill", "value": 9}]}
+    en, idn = explain.visible_issues(out)[0]
+    assert "[mu_fill]" in en and "[mu_fill]" in idn
+    assert "9" not in en                       # nilai tidak ditampilkan, hanya nama parameter
+
+
+def test_parameter_menunggu_diambil_dari_profil_bila_engine_belum_mengisi():
+    out = {"run_mode": "MANUAL_REQUIRED", "status": "MISSING_PARAMETER", "parameter_status": {}}
+    profile = {"params": {"mu_fill": {"status": "PENDING", "value": None}, "area_ha": {"status": "LITERATURE", "value": 1.0}}}
+    assert explain.pending_parameters(out, profile) == ["mu_fill"]
+    rs = dict(explain.hold_reasons(out, demo=True, profile=profile))
+    en, idn = rs["missing_parameter"]
+    assert "mu_fill" in en and "mu_fill" in idn and "area_ha" not in en
+
+
+def test_status_run_di_engine_diutamakan_daripada_profil():
+    out = {"status": "MISSING_PARAMETER", "parameter_status": {"a": "PENDING"}}
+    profile = {"params": {"b": {"status": "PENDING"}}}
+    assert explain.pending_parameters(out, profile) == ["a"]

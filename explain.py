@@ -37,14 +37,19 @@ def status_summary(out: dict) -> tuple:
     return (f"Unrecognised run mode: {mode}.", f"Mode run tidak dikenal: {mode}.")
 
 
-def pending_parameters(out: dict) -> list:
-    """Nama parameter yang masih PENDING (menunggu pengukuran/kalibrasi), terurut."""
+def pending_parameters(out: dict, profile: dict = None) -> list:
+    """Nama parameter yang masih PENDING (menunggu pengukuran/kalibrasi), terurut.
+    Sumber utama: out['parameter_status']; jika kosong (engine berhenti sebelum mengisinya), pakai profil petak."""
     ps = (out or {}).get("parameter_status") or {}
-    return sorted(str(k) for k, v in ps.items() if v == "PENDING")
+    names = [str(k) for k, v in ps.items() if v == "PENDING"]
+    if not ps and profile:
+        names = [str(k) for k, p in (profile.get("params") or {}).items()
+                 if isinstance(p, dict) and p.get("status") == "PENDING"]
+    return sorted(names)
 
 
 def hold_reasons(out: dict, *, demo: bool = False, expired: bool = False, inputs_changed: bool = False,
-                 profile_changed: bool = False) -> list:
+                 profile_changed: bool = False, profile: dict = None) -> list:
     """Alasan run tidak dapat diterbitkan untuk keputusan: daftar (kode, (en, id)). Kosong = tidak ada penghalang.
     demo=True: run simulasi diterbitkan lewat aturan demo, jadi pemeriksaan mode operasional dilewati."""
     out = out or {}
@@ -55,7 +60,7 @@ def hold_reasons(out: dict, *, demo: bool = False, expired: bool = False, inputs
     for c in codes:
         rows.append((c, texts.DECISION_ERR.get(c, (c, c))))
     if out.get("status") == "MISSING_PARAMETER":
-        pend = pending_parameters(out)
+        pend = pending_parameters(out, profile)
         if pend:
             names = ", ".join(pend)
             rows.append(("missing_parameter",
@@ -65,15 +70,22 @@ def hold_reasons(out: dict, *, demo: bool = False, expired: bool = False, inputs
 
 
 def visible_issues(out: dict) -> list:
-    """Semua isu run sebagai (en, id). Isu berkode tak dikenal TIDAK disembunyikan: ditampilkan apa adanya."""
+    """Isu run sebagai (en, id). Isu berkode tak dikenal TIDAK disembunyikan: ditampilkan apa adanya.
+    Dilewati hanya isu yang kodenya sama dengan status run (sudah tampil di banner status).
+    Teks: texts.ISSUE, lalu texts.STATUS, lalu kode mentah. Nama parameter (bila ada) ditambahkan."""
+    out = out or {}
     res = []
-    for i in (out or {}).get("issues") or []:
+    for i in out.get("issues") or []:
         code = i.get("code") if isinstance(i, dict) else str(i)
-        known = texts.ISSUE.get(code)
-        if known:
-            res.append(known)
-        else:
-            res.append((f"{code} (no description available)", f"{code} (belum ada deskripsi)"))
+        if code == out.get("status"):
+            continue
+        txt = texts.ISSUE.get(code) or texts.STATUS.get(code)
+        if not txt:
+            txt = (f"{code} (no description available)", f"{code} (belum ada deskripsi)")
+        param = i.get("param") if isinstance(i, dict) else None
+        if param:
+            txt = (f"{txt[0]} [{param}]", f"{txt[1]} [{param}]")
+        res.append(txt)
     return res
 
 
