@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import streamlit as st
 
-st.set_page_config(page_title="SOMAT Dashboard", page_icon="💧", layout="wide", initial_sidebar_state="auto")
+st.set_page_config(page_title="SEKAR — Adaptive Irrigation", page_icon="💧", layout="wide", initial_sidebar_state="auto")
 
 import auth  # noqa: E402
 import db  # noqa: E402
@@ -21,6 +21,7 @@ import store  # noqa: E402
 import derive  # noqa: E402
 import ocean_theme  # noqa: E402
 import repository  # noqa: E402
+import sekar_theme  # noqa: E402
 import styles  # noqa: E402
 import ui_kit  # noqa: E402
 from data_hub import build_hub  # noqa: E402
@@ -91,9 +92,10 @@ COLLAPSED = bool(st.session_state["sb_collapsed"])
 IS_DARK = not bool(st.session_state["light_mode"])
 # build_css() sudah membungkus dirinya dengan <style>...</style>; bungkus ganda membuat CSS ui_kit bocor jadi teks.
 # Satu blok <style> saja, tanpa baris kosong.
-_css = (ocean_theme.FONT_IMPORT + "\n"   # @import harus paling awal di blok <style>
+_css = (ocean_theme.FONT_IMPORT + "\n" + sekar_theme.FONT_IMPORT + "\n"   # @import harus paling awal di blok <style>
         + styles.build_css(IS_DARK, COLLAPSED).replace("<style>", "").replace("</style>", "") + "\n" + ui_kit.ui_css(IS_DARK)
-        + "\n" + ocean_theme.global_css(IS_DARK))
+        + "\n" + ocean_theme.global_css(IS_DARK)
+        + "\n" + sekar_theme.dashboard_css(IS_DARK))   # tema SEKAR dipasang terakhir agar menang
 _css = "\n".join(ln for ln in _css.splitlines() if ln.strip())
 st.markdown(f"<style>\n{_css}\n</style>", unsafe_allow_html=True)
 
@@ -197,10 +199,10 @@ if auth.is_admin():
 
 with st.sidebar:
     if COLLAPSED:
-        st.markdown(f'<div class="side-brand mini"><img src="{styles.LOGO_SRC}" alt="SOMAT"></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="side-brand mini"><img src="{styles.LOGO_SRC}" alt="SEKAR"></div>', unsafe_allow_html=True)
     else:
-        st.markdown(f'<div class="side-brand"><img src="{styles.LOGO_SRC}" alt="Logo SOMAT"><div><div class="side-brand-name">SOMAT</div>'
-                    f'<div class="side-brand-sub">Smart Adaptive Irrigation Management System</div></div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="side-brand"><img src="{styles.LOGO_SRC}" alt="Logo SEKAR"><div><div class="side-brand-name">SEKAR</div>'
+                    f'<div class="side-brand-sub">{sekar_theme.TAGLINE}</div></div></div>', unsafe_allow_html=True)
         if D.is_real:
             st.success(L("Live sensor data", "Data sensor live"))
         else:
@@ -243,7 +245,7 @@ with st.sidebar:
                        for k, n in (("sensor", L("Sensors", "Sensor")), ("forecast", L("BMKG forecast", "Prakiraan BMKG")),
                                     ("warnings", L("BMKG warnings", "Peringatan BMKG"))))
         st.markdown(f'<div class="side-info-card"><div class="side-info-title">🔄 <span>{L("Data freshness (background)", "Kesegaran data (latar belakang)")}</span></div>'
-                    f'{rows}</div><div class="side-info-card"><div class="side-info-title">🔁 <span>{L("SOMAT workflow", "Alur kerja SOMAT")}</span></div>'
+                    f'{rows}</div><div class="side-info-card"><div class="side-info-title">🔁 <span>{L("SEKAR workflow", "Alur kerja SEKAR")}</span></div>'
                     f'<div class="side-flow">{L("Field h → Forecast → Water balance → Recommendation → Operator decision → Actual irrigation → Evaluation", "h lapangan → Prakiraan → Neraca air → Rekomendasi → Keputusan operator → Irigasi aktual → Evaluasi")}</div></div>',
                     unsafe_allow_html=True)
 
@@ -261,10 +263,7 @@ if demo_mode.is_demo():
     st.markdown(f'<div class="demo-banner" role="status" style="background:{_bn_bg};color:{_bn_fg} !important;border-left:6px solid #F97316;'
                 f'padding:.55rem .9rem;border-radius:8px;margin-bottom:.5rem;font-weight:600">'
                 f'{html.escape(L(demo_mode.BANNER_EN, demo_mode.BANNER_ID))}</div>', unsafe_allow_html=True)
-st.markdown(f'<div class="somat-header"><img src="{styles.LOGO_SRC}" alt="Logo SOMAT"><div>'
-            f'<h1>SOMAT — Smart Adaptive Irrigation Management System</h1>'
-            f'<p>{L("Decision-support for observation, water-balance prediction, operator decisions and evaluation.", "Pendukung keputusan untuk observasi, prediksi neraca air, keputusan operator, dan evaluasi.")}</p></div></div>',
-            unsafe_allow_html=True)
+st.markdown(f'<div class="sekar-banner" style="margin:0 0 14px"><img src="{sekar_theme.STATIC}/sekar_banner.jpg" alt="SEKAR \u2014 {sekar_theme.FULL_EN}" style="width:100%!important;height:auto!important;max-height:none!important;display:block;border-radius:18px;box-shadow:0 14px 34px rgba(0,0,0,.35)"></div>', unsafe_allow_html=True)
 
 # ---------------- halaman ----------------
 try:

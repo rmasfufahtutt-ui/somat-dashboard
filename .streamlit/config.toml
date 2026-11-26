@@ -1,7 +1,10 @@
 [theme]
 base = "dark"
 primaryColor = "#22C79A"
-backgroundColor = "#050E1C"
-secondaryBackgroundColor = "#0A1B30"
+backgroundColor = "#04101F"
+secondaryBackgroundColor = "#0A2742"
 textColor = "#E6EEF6"
 font = "sans serif"
+
+[server]
+enableStaticServing = true

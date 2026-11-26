@@ -8,6 +8,7 @@ from auth import authenticate, auth_msg, start_session, current_user
 import db
 from i18n import L
 from styles import LOGO_SRC, _irrigation_image_b64
+import sekar_theme
 
 _irr = _irrigation_image_b64()
 IRRIGATION_SRC = f"data:image/jpeg;base64,{_irr}" if _irr else ""
@@ -33,15 +34,16 @@ def render_demo_login(key="demo_login"):
             st.rerun()
 
 
-def render_login_form(key="login_form"):
-    st.subheader(L("🔐 Sign in", "🔐 Masuk"))
+def render_login_form(key="login_form", show_title=True):
+    if show_title:
+        st.subheader(L("🔐 Sign in", "🔐 Masuk"))
     if not db.active():
         st.error(auth_msg("db"))
         render_demo_login()
         return
     with st.form(key):
-        uname = st.text_input(L("Username", "Nama pengguna"))
-        pwd = st.text_input(L("Password", "Kata sandi"), type="password")
+        uname = st.text_input(L("Username", "Nama pengguna"), placeholder=L("Username", "Nama pengguna"))
+        pwd = st.text_input(L("Password", "Kata sandi"), type="password", placeholder=L("Password", "Kata sandi"))
         go = st.form_submit_button(L("Sign in", "Masuk"), type="primary")
     if go:
         user, err = authenticate(uname, pwd)
@@ -57,7 +59,7 @@ def render_restoring_screen():
     """Tampil sebentar saat memeriksa sesi tersimpan (sebelum layar login)."""
     st.markdown('<div class="login-page-spacer"></div>', unsafe_allow_html=True)
     st.markdown(
-        f'''<div style="text-align:center;padding:3rem 0;opacity:.9"><img src="{LOGO_SRC}" alt="SOMAT" style="width:64px">
+        f'''<div style="text-align:center;padding:3rem 0;opacity:.9"><img src="{LOGO_SRC}" alt="SEKAR" style="width:64px">
         <p>{L("Checking your session…", "Memeriksa sesi Anda…")}</p></div>''',
         unsafe_allow_html=True,
     )
@@ -67,40 +69,53 @@ def render_restoring_screen():
 
 
 
+# Perbaikan tampilan login: berdiri sendiri di sini agar tidak bergantung pada sekar_theme.py yang bisa ter-cache.
+LOGIN_FIX_CSS = r"""
+/* Layar login: SATU tema (terang) untuk mode gelap maupun terang. Selektor dibuat sangat spesifik agar menang atas CSS tema dashboard. */
+@media(min-width:901px){ html body .stApp .sk-hero, html body .stApp [data-testid="stMarkdownContainer"]:has(> .sk-hero){display:none!important} }
+html body .stApp .st-key-sekar_login_card{color-scheme:light!important;background:linear-gradient(160deg,rgba(255,255,255,.90),rgba(232,242,250,.84))!important}
+html body .stApp .st-key-sekar_login_card :is(p,span,label,small,li,div){color:#243b52!important}
+html body .stApp .st-key-sekar_login_card :is(h1,h2,h3){color:#0b2a46!important}
+html body .stApp .st-key-sekar_login_card [data-testid="stCaptionContainer"] *{color:#47607a!important}
+html body .stApp .st-key-sekar_login_card [data-baseweb="input"],html body .stApp .st-key-sekar_login_card [data-baseweb="base-input"]{background:#ffffff!important;border:1px solid rgba(11,42,70,.28)!important;border-radius:14px!important}
+html body .stApp .st-key-sekar_login_card input{color:#0b2a46!important;-webkit-text-fill-color:#0b2a46!important;background:transparent!important}
+html body .stApp .st-key-sekar_login_card input::placeholder{color:#7a8ea3!important;-webkit-text-fill-color:#7a8ea3!important;opacity:1!important}
+html body .stApp .st-key-sekar_login_card [data-baseweb="input"] svg{fill:#516a80!important;color:#516a80!important}
+html body .stApp .st-key-sekar_login_card [data-testid^="stBaseButton"]{background:#ffffff!important;border:1px solid rgba(11,42,70,.30)!important;border-radius:12px!important;min-height:44px;box-shadow:none!important}
+html body .stApp .st-key-sekar_login_card [data-testid^="stBaseButton"] *{color:#0b2a46!important;-webkit-text-fill-color:#0b2a46!important;font-weight:700;font-size:.85rem;line-height:1.15;white-space:normal!important;overflow:visible!important;text-overflow:clip!important}
+html body .stApp .st-key-sekar_login_card [data-testid^="stBaseButton"]:hover{background:#eef5fb!important;border-color:#0b2a46!important}
+html body .stApp .st-key-sekar_login_card [data-testid^="stBaseButton"][data-testid*="primary"]{background:#0b2a46!important;border:0!important;min-height:54px;border-radius:999px!important}
+html body .stApp .st-key-sekar_login_card [data-testid^="stBaseButton"][data-testid*="primary"] *{color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;font-size:1.05rem;font-weight:800}
+html body .stApp .st-key-sekar_login_card [data-testid="stAlertContainer"]{background:#fdeceb!important;border:1px solid #f1b5b0!important;border-radius:12px!important}
+html body .stApp .st-key-sekar_login_card [data-testid="stAlertContainer"] *{color:#7a1d1d!important;-webkit-text-fill-color:#7a1d1d!important}
+html body .stApp .st-key-sekar_login_card hr{border-color:rgba(11,42,70,.18)!important}
+html body .stApp .st-key-lang_btn [data-testid^="stBaseButton"]{background:rgba(255,255,255,.85)!important;border:1px solid rgba(11,42,70,.25)!important}
+html body .stApp .st-key-lang_btn [data-testid^="stBaseButton"] *{color:#0b2a46!important;-webkit-text-fill-color:#0b2a46!important}
+"""
+
 def render_login_screen():
-    'Login menjadi layar pertama; sidebar dan konten dashboard belum dirender.'
+    'Layar login SEKAR: latar sawah penuh, logo + judul di kiri, kartu kaca di kanan. Sidebar/dashboard belum dirender.'
+    st.markdown("<style>\n" + sekar_theme.FONT_IMPORT + "\n" + sekar_theme.login_css() + "\n</style>", unsafe_allow_html=True)
+    st.markdown("<style>\n" + LOGIN_FIX_CSS + "\n</style>", unsafe_allow_html=True)
     st.markdown('<div class="login-page-spacer"></div>', unsafe_allow_html=True)
-    left, right = st.columns([1.18, 0.82], gap="large", vertical_alignment="center")
+    left, right = st.columns([1.15, 0.85], gap="large", vertical_alignment="center")
     with left:
-        if IRRIGATION_SRC:
-            _bg = f"linear-gradient(180deg,rgba(5,18,38,.20) 0%,rgba(5,18,38,.84) 100%),url('{IRRIGATION_SRC}')"
-        else:
-            _bg = "linear-gradient(135deg,#0B3B65,#0F766E)"
         st.markdown(
-            f'''<section class="login-visual" style="background-image:{_bg};">
-              <div class="login-visual-brand"><img src="{LOGO_SRC}" alt="SOMAT logo"><div>
-                <strong>SOMAT</strong><span>Smart Adaptive Irrigation Management System</span>
-              </div></div>
-              <div class="login-visual-copy"><small>SMART IRRIGATION · DATA · DECISION</small>
-                <h2>{L("Smarter water management starts with better decisions.", "Pengelolaan air yang lebih cerdas dimulai dari keputusan yang lebih baik.")}</h2>
-                <p>{L("Monitor field conditions, review irrigation recommendations, and keep operational decisions under human control.", "Pantau kondisi lahan, tinjau rekomendasi irigasi, dan pastikan keputusan operasional tetap berada di bawah kendali manusia.")}</p>
-              </div>
-              <div class="login-visual-foot">SOMAT · Smart Adaptive Irrigation Management System</div>
+            f'''<section class="sk-hero">
+              <img src="{sekar_theme.STATIC}/sekar_logo.png" onerror="this.onerror=null;this.src=\'{LOGO_SRC}\'" alt="SEKAR logo">
+              <div class="sk-title">SEKAR</div>
+              <div class="sk-tag">{sekar_theme.TAGLINE}</div>
+              <div class="sk-sub">{sekar_theme.FULL_ID}<i>{sekar_theme.FULL_EN}</i></div>
             </section>''',
             unsafe_allow_html=True,
         )
     with right:
-        st.markdown(
-            f'''<div class="login-panel-brand"><img src="{LOGO_SRC}" alt="Logo SOMAT"><div>
-              <strong>SOMAT</strong><span>Smart Adaptive Irrigation Management System</span>
-            </div></div>''',
-            unsafe_allow_html=True,
-        )
-        st.header(L("Welcome back", "Selamat datang kembali"))
-        st.caption(L("Sign in with your registered account to access the dashboard.", "Masuk menggunakan akun terdaftar untuk mengakses dashboard."))
-        if st.session_state.pop("_expired", False):
-            st.warning(L("Your session expired after 30 minutes of inactivity. Please sign in again.",
-                         "Sesi berakhir setelah 30 menit tidak aktif. Silakan masuk kembali."))
-        render_login_form("login_form")
-        st.caption(L("Access is managed by the SOMAT administrator.", "Hak akses dikelola oleh administrator SOMAT."))
-
+        with st.container(key="sekar_login_card"):
+            st.header(L("Sign in to SEKAR", "Masuk ke SEKAR"))
+            st.caption(L("System access for monitoring, evaluation, and irrigation recommendations.",
+                         "Akses sistem untuk monitoring, evaluasi, dan rekomendasi irigasi."))
+            if st.session_state.pop("_expired", False):
+                st.warning(L("Your session expired after a long period of inactivity. Please sign in again.",
+                             "Sesi berakhir karena lama tidak aktif. Silakan masuk kembali."))
+            render_login_form("login_form", show_title=False)
+            st.caption(L("Access is managed by the SEKAR administrator.", "Hak akses dikelola oleh administrator SEKAR."))

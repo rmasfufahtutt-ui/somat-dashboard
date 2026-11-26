@@ -11,7 +11,7 @@ import streamlit as st
 from PIL import Image
 
 BASE_DIR = Path(__file__).resolve().parent
-LOGO_PATH = BASE_DIR / "assets" / "somat_logo.png"
+LOGO_PATH = BASE_DIR / "assets" / "sekar_logo.png"
 IRRIGATION_LOGIN_PATH = BASE_DIR / "assets" / "irrigation_login.jpg"
 
 
