@@ -72,6 +72,9 @@ def render_restoring_screen():
 # Perbaikan tampilan login: berdiri sendiri di sini agar tidak bergantung pada sekar_theme.py yang bisa ter-cache.
 LOGIN_FIX_CSS = r"""
 /* Layar login: SATU tema (terang) untuk mode gelap maupun terang. Selektor dibuat sangat spesifik agar menang atas CSS tema dashboard. */
+/* latar login dikunci ke foto sawah, menang atas latar dalam dashboard (sekar_bg) */
+html body .stApp.stApp{background:#7fb0d8 url('app/static/sekar_login_bg.jpg') center/cover no-repeat fixed!important}
+html body .stApp.stApp::before{display:none!important}
 @media(min-width:901px){ html body .stApp .sk-hero, html body .stApp [data-testid="stMarkdownContainer"]:has(> .sk-hero){display:none!important} }
 html body .stApp .st-key-sekar_login_card{color-scheme:light!important;background:linear-gradient(160deg,rgba(255,255,255,.90),rgba(232,242,250,.84))!important}
 html body .stApp .st-key-sekar_login_card :is(p,span,label,small,li,div){color:#243b52!important}

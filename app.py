@@ -22,6 +22,7 @@ import derive  # noqa: E402
 import ocean_theme  # noqa: E402
 import repository  # noqa: E402
 import sekar_theme  # noqa: E402
+import sekar_bg  # noqa: E402
 import styles  # noqa: E402
 import ui_kit  # noqa: E402
 from data_hub import build_hub  # noqa: E402
@@ -95,7 +96,8 @@ IS_DARK = not bool(st.session_state["light_mode"])
 _css = (ocean_theme.FONT_IMPORT + "\n" + sekar_theme.FONT_IMPORT + "\n"   # @import harus paling awal di blok <style>
         + styles.build_css(IS_DARK, COLLAPSED).replace("<style>", "").replace("</style>", "") + "\n" + ui_kit.ui_css(IS_DARK)
         + "\n" + ocean_theme.global_css(IS_DARK)
-        + "\n" + sekar_theme.dashboard_css(IS_DARK))   # tema SEKAR dipasang terakhir agar menang
+        + "\n" + sekar_theme.dashboard_css(IS_DARK)
+        + "\n" + sekar_bg.css(IS_DARK))   # tema SEKAR dipasang terakhir agar menang
 _css = "\n".join(ln for ln in _css.splitlines() if ln.strip())
 st.markdown(f"<style>\n{_css}\n</style>", unsafe_allow_html=True)
 
