@@ -94,6 +94,19 @@ html body .stApp .st-key-sekar_login_card [data-testid="stAlertContainer"] *{col
 html body .stApp .st-key-sekar_login_card hr{border-color:rgba(11,42,70,.18)!important}
 html body .stApp .st-key-lang_btn [data-testid^="stBaseButton"]{background:rgba(255,255,255,.85)!important;border:1px solid rgba(11,42,70,.25)!important}
 html body .stApp .st-key-lang_btn [data-testid^="stBaseButton"] *{color:#0b2a46!important;-webkit-text-fill-color:#0b2a46!important}
+
+/* kolom input: Streamlit baru mengecat wadahnya (stTextInputRootElement) dengan warna tema gelap */
+html body .stApp .st-key-sekar_login_card [data-testid="stTextInputRootElement"],html body .stApp .st-key-sekar_login_card [data-testid="stTextInput"] [data-baseweb="input"]{background:#ffffff!important;border:1px solid rgba(11,42,70,.28)!important;border-radius:14px!important}
+html body .stApp .st-key-sekar_login_card [data-testid="stTextInputRootElement"] button{background:transparent!important;border:0!important;box-shadow:none!important}
+html body .stApp .st-key-sekar_login_card [data-testid="stTextInputRootElement"] svg{fill:#516a80!important;color:#516a80!important}
+html body .stApp .st-key-sekar_login_card [data-testid="stFormSubmitButton"],html body .stApp .st-key-sekar_login_card [data-testid="stFormSubmitButton"] button{width:100%!important}
+/* HP / layar sempit: hero diberi panel gelap agar tulisan putih terbaca, jarak ke kartu, dan latar digeser ke sisi kanan (tanpa sisa tulisan di tepi kiri) */
+@media(max-width:900px){
+  html body .stApp.stApp{background-position:86% center!important}
+  html body .stApp .sk-hero{background:rgba(6,34,58,.62)!important;border-radius:26px;padding:1.2rem 1rem 1.4rem!important;margin-bottom:1.2rem!important;
+    -webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+  html body .stApp .st-key-sekar_login_card{margin-top:.6rem!important}
+}
 """
 
 def render_login_screen():
